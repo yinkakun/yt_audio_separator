@@ -1393,45 +1393,6 @@ wheels = [
 ]
 
 [[package]]
-name = "sound-separator"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "audio-separator" },
-    { name = "flask" },
-    { name = "flask-limiter" },
-    { name = "librosa" },
-    { name = "onnxruntime" },
-    { name = "soundfile" },
-    { name = "yt-dlp" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "black" },
-    { name = "isort" },
-    { name = "pylint" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "audio-separator", specifier = ">=0.36.1" },
-    { name = "flask", specifier = ">=3.0.0" },
-    { name = "flask-limiter", specifier = ">=3.0.0" },
-    { name = "librosa", specifier = ">=0.10.0" },
-    { name = "onnxruntime", specifier = ">=1.22.1" },
-    { name = "soundfile", specifier = ">=0.12.0" },
-    { name = "yt-dlp", specifier = ">=2025.9.5" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "black", specifier = ">=25.1.0" },
-    { name = "isort", specifier = ">=6.0.1" },
-    { name = "pylint", specifier = ">=3.3.8" },
-]
-
-[[package]]
 name = "soundfile"
 version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1699,6 +1660,45 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/79/d9/7cfd5a312760ac4dd8bf0184a6ee9e43c33e47f3dadc303032ce012b8fa3/wrapt-1.17.3-cp314-cp314t-win_amd64.whl", hash = "sha256:73d496de46cd2cdbdbcce4ae4bcdb4afb6a11234a1df9c085249d55166b95116", size = 41334, upload-time = "2025-08-12T05:53:14.178Z" },
     { url = "https://files.pythonhosted.org/packages/46/78/10ad9781128ed2f99dbc474f43283b13fea8ba58723e98844367531c18e9/wrapt-1.17.3-cp314-cp314t-win_arm64.whl", hash = "sha256:f38e60678850c42461d4202739f9bf1e3a737c7ad283638251e79cc49effb6b6", size = 38471, upload-time = "2025-08-12T05:52:57.784Z" },
     { url = "https://files.pythonhosted.org/packages/1f/f6/a933bd70f98e9cf3e08167fc5cd7aaaca49147e48411c0bd5ae701bb2194/wrapt-1.17.3-py3-none-any.whl", hash = "sha256:7171ae35d2c33d326ac19dd8facb1e82e5fd04ef8c6c0e394d7af55a55051c22", size = 23591, upload-time = "2025-08-12T05:53:20.674Z" },
+]
+
+[[package]]
+name = "yt-audio-separator"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "audio-separator" },
+    { name = "flask" },
+    { name = "flask-limiter" },
+    { name = "librosa" },
+    { name = "onnxruntime" },
+    { name = "soundfile" },
+    { name = "yt-dlp" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "black" },
+    { name = "isort" },
+    { name = "pylint" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "audio-separator", specifier = ">=0.36.1" },
+    { name = "flask", specifier = ">=3.0.0" },
+    { name = "flask-limiter", specifier = ">=3.0.0" },
+    { name = "librosa", specifier = ">=0.10.0" },
+    { name = "onnxruntime", specifier = ">=1.22.1" },
+    { name = "soundfile", specifier = ">=0.12.0" },
+    { name = "yt-dlp", specifier = ">=2025.9.5" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "black", specifier = ">=25.1.0" },
+    { name = "isort", specifier = ">=6.0.1" },
+    { name = "pylint", specifier = ">=3.3.8" },
 ]
 
 [[package]]
