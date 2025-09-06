@@ -1,0 +1,8 @@
+__pycache__/
+.venv/
+audio_separator_output/
+*.wav
+*.mp3
+.env
+*.log
+.DS_Store
