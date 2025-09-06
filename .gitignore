@@ -1,6 +1,6 @@
 __pycache__/
 .venv/
-audio_separator_output/
+separated_tracks/
 *.wav
 *.mp3
 .env

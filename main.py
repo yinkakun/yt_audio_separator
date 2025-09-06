@@ -33,7 +33,7 @@ class JobStatus(Enum):
 
 @dataclass
 class Config:
-    OUTPUT_DIR: Path = Path("audio_separator_output")
+    OUTPUT_DIR: Path = Path("separated_tracks")
     MAX_TITLE_LENGTH: int = 100
     MAX_ARTIST_LENGTH: int = 100
     MAX_SEARCH_QUERY_LENGTH: int = 200
@@ -109,13 +109,13 @@ class TaskManager:
                     amplification_threshold=0.9,
                     mdx_params={
                         "hop_length": 1024,
-                        "segment_size": 512,
-                        "overlap": 0.25,
-                        "batch_size": 4,
+                        "segment_size": 256,
+                        "overlap": 0.5,
+                        "batch_size": 2,
                         "enable_denoise": True,
                     },
                 )
-                self._separator.load_model(model_filename="UVR-MDX-NET-Voc_FT.onnx")
+                self._separator.load_model(model_filename="UVR-MDX-NET-Inst_HQ_3.onnx")
                 logger.info("Separator model initialized")
             return self._separator
 
