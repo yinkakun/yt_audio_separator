@@ -1,139 +1,152 @@
-import os
-from dataclasses import dataclass, field
-
-from dotenv import load_dotenv
-
-load_dotenv()
+from pydantic import BaseModel, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def safe_int_from_env(env_var: str, default: int) -> int:
-    try:
-        value = int(os.getenv(env_var, str(default)))
-        return value
-    except ValueError as e:
-        if "invalid literal for int()" in str(e):
-            raise ValueError(f"Invalid integer value for {env_var}: {os.getenv(env_var)}") from e
-        raise
+class InputLimitsSettings(BaseModel):
+    max_search_query_length: int
+    max_file_size_mb: int
 
 
-@dataclass
-class InputLimits:
-    max_search_query_length: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "MAX_SEARCH_QUERY_LENGTH",
-            200,
-        )
-    )
-    max_file_size_mb: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "MAX_FILE_SIZE_MB",
-            50,
-        )
-    )
+class ProcessingSettings(BaseModel):
+    timeout: int
+    max_workers: int
+    max_active_jobs: int
+    cleanup_interval: int
 
 
-@dataclass
-class ProcessingSettings:
-    timeout: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "PROCESSING_TIMEOUT",
-            60,
-        )
-    )
-    max_workers: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "MAX_WORKERS",
-            2,
-        )
-    )
-    max_active_jobs: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "MAX_ACTIVE_JOBS",
-            2,
-        )
-    )
-    cleanup_interval: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "CLEANUP_INTERVAL",
-            3600,
-        )
+class RateLimitsSettings(BaseModel):
+    requests: str
+    separation: str
+
+
+class ServerSettings(BaseModel):
+    host: str
+    port: int
+    debug: bool
+
+
+class WebhookSettings(BaseModel):
+    url: str
+    secret: str
+    timeout: int
+    max_retries: int
+    retry_delay: int
+
+
+class R2StorageSettings(BaseModel):
+    account_id: str
+    access_key_id: str
+    secret_access_key: str
+    bucket_name: str
+    public_domain: str
+
+
+class Config(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        validate_default=True,
+        extra="ignore",
     )
 
+    max_search_query_length: int = 200
+    max_file_size_mb: int = 50
 
-@dataclass
-class RateLimits:
-    requests: str = field(default_factory=lambda: os.getenv("RATE_LIMIT_REQUESTS", "100 per hour"))
-    separation: str = field(
-        default_factory=lambda: os.getenv("RATE_LIMIT_SEPARATION", "5 per minute")
-    )
+    max_workers: int = 2
+    max_active_jobs: int = 2
+    cleanup_interval: int = 3600
+    processing_timeout: int = 60
 
+    rate_limit_requests: str = "100 per hour"
+    rate_limit_separation: str = "5 per minute"
 
-@dataclass
-class ServerSettings:
-    host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
-    port: int = field(default_factory=lambda: safe_int_from_env("PORT", 5500))
-    debug: bool = field(
-        default_factory=lambda: os.getenv("DEBUG", "false").lower() in ("true", "1", "yes", "on")
-    )
+    port: int = 5500
+    debug: bool = False
+    host: str = "0.0.0.0"
 
+    secret_key: str = ""
 
-@dataclass
-class WebhookSettings:
-    url: str = field(default_factory=lambda: os.getenv("WEBHOOK_URL", ""))
-    secret: str = field(default_factory=lambda: os.getenv("WEBHOOK_SECRET", ""))
-    timeout: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "WEBHOOK_TIMEOUT",
-            30,
-        )
-    )
-    max_retries: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "WEBHOOK_MAX_RETRIES",
-            3,
-        )
-    )
-    retry_delay: int = field(
-        default_factory=lambda: safe_int_from_env(
-            "WEBHOOK_RETRY_DELAY",
-            5,
-        )
-    )
+    webhook_url: str = ""
+    webhook_secret: str = ""
+    webhook_timeout: int = 30
+    webhook_max_retries: int = 3
+    webhook_retry_delay: int = 5
 
+    cloudflare_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = "audio-separation"
+    r2_public_domain: str = ""
 
-@dataclass
-class R2StorageSettings:
-    account_id: str = field(default_factory=lambda: os.getenv("CLOUDFLARE_ACCOUNT_ID", ""))
-    access_key_id: str = field(default_factory=lambda: os.getenv("R2_ACCESS_KEY_ID", ""))
-    secret_access_key: str = field(default_factory=lambda: os.getenv("R2_SECRET_ACCESS_KEY", ""))
-    bucket_name: str = field(
-        default_factory=lambda: os.getenv("R2_BUCKET_NAME", "audio-separation")
-    )
-    public_domain: str = field(default_factory=lambda: os.getenv("R2_PUBLIC_DOMAIN", ""))
-
-
-@dataclass
-class Config:
-    input_limits: InputLimits = field(default_factory=InputLimits)
-    processing: ProcessingSettings = field(default_factory=ProcessingSettings)
-    rate_limits: RateLimits = field(default_factory=RateLimits)
-    server: ServerSettings = field(default_factory=ServerSettings)
-    webhooks: WebhookSettings = field(default_factory=WebhookSettings)
-    r2_storage: R2StorageSettings = field(default_factory=R2StorageSettings)
-
+    @computed_field
     @property
-    def R2_STORAGE(self) -> bool:
-        return bool(
-            self.r2_storage.account_id
-            and self.r2_storage.access_key_id
-            and self.r2_storage.secret_access_key
-            and self.r2_storage.public_domain
+    def input_limits(self) -> InputLimitsSettings:
+        return InputLimitsSettings(
+            max_search_query_length=self.max_search_query_length,
+            max_file_size_mb=self.max_file_size_mb,
         )
 
-    def validate(self):
-        """Validate configuration values"""
-        if not self.R2_STORAGE:
-            raise ValueError("R2 storage must be configured - filesystem storage disabled")
+    @computed_field
+    @property
+    def processing(self) -> ProcessingSettings:
+        return ProcessingSettings(
+            timeout=self.processing_timeout,
+            max_workers=self.max_workers,
+            max_active_jobs=self.max_active_jobs,
+            cleanup_interval=self.cleanup_interval,
+        )
 
-        if self.webhooks.url and self.webhooks.secret and len(self.webhooks.secret) < 32:
+    @computed_field
+    @property
+    def rate_limits(self) -> RateLimitsSettings:
+        return RateLimitsSettings(
+            requests=self.rate_limit_requests, separation=self.rate_limit_separation
+        )
+
+    @computed_field
+    @property
+    def server(self) -> ServerSettings:
+        return ServerSettings(host=self.host, port=self.port, debug=self.debug)
+
+    @computed_field
+    @property
+    def webhooks(self) -> WebhookSettings:
+        return WebhookSettings(
+            url=self.webhook_url,
+            secret=self.webhook_secret,
+            timeout=self.webhook_timeout,
+            max_retries=self.webhook_max_retries,
+            retry_delay=self.webhook_retry_delay,
+        )
+
+    @computed_field
+    @property
+    def r2_storage(self) -> R2StorageSettings:
+        return R2StorageSettings(
+            account_id=self.cloudflare_account_id,
+            access_key_id=self.r2_access_key_id,
+            secret_access_key=self.r2_secret_access_key,
+            bucket_name=self.r2_bucket_name,
+            public_domain=self.r2_public_domain,
+        )
+
+    @computed_field
+    @property
+    def r2_storage_enabled(self) -> bool:
+        return bool(
+            self.cloudflare_account_id
+            and self.r2_access_key_id
+            and self.r2_secret_access_key
+            and self.r2_public_domain
+        )
+
+    def validate_for_production(self) -> None:
+        """Validate configuration"""
+        if not self.secret_key:
+            raise ValueError("SECRET_KEY must be configured")
+
+        if not self.r2_storage_enabled:
+            raise ValueError("R2 storage must be configured")
+
+        if self.webhook_url and self.webhook_secret and len(self.webhook_secret) < 32:
             raise ValueError("WEBHOOK_SECRET must be at least 32 characters for security")

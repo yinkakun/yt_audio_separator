@@ -29,22 +29,25 @@ def validate_environment(config):
     warnings = []
     errors = []
 
-    if not config.R2_STORAGE:
+    if not config.r2_storage_enabled:
         errors.append("R2 storage is required but not configured")
     else:
-        required_r2_vars = [
-            "CLOUDFLARE_ACCOUNT_ID",
-            "R2_ACCESS_KEY_ID",
-            "R2_SECRET_ACCESS_KEY",
-            "R2_PUBLIC_DOMAIN",
-        ]
-        missing_r2_vars = [var for var in required_r2_vars if not os.getenv(var)]
-        if missing_r2_vars:
+        missing_r2_configs = []
+        if not config.cloudflare_account_id:
+            missing_r2_configs.append("CLOUDFLARE_ACCOUNT_ID")
+        if not config.r2_access_key_id:
+            missing_r2_configs.append("R2_ACCESS_KEY_ID")
+        if not config.r2_secret_access_key:
+            missing_r2_configs.append("R2_SECRET_ACCESS_KEY")
+        if not config.r2_public_domain:
+            missing_r2_configs.append("R2_PUBLIC_DOMAIN")
+
+        if missing_r2_configs:
             errors.append(
-                f"Missing required R2 environment variables: {', '.join(missing_r2_vars)}"
+                f"Missing required R2 environment variables: {', '.join(missing_r2_configs)}"
             )
 
-    if not os.getenv("WEBHOOK_URL"):
+    if not config.webhook_url:
         warnings.append("WEBHOOK_URL not set - webhooks will not work")
 
     for w in warnings:
@@ -62,16 +65,13 @@ def validate_environment(config):
 def create_app():
     """Application factory"""
     config = Config()
-    config.validate()
+    config.validate_for_production()
 
     setup_logging(config.server.debug)
 
     app = Flask(__name__)
 
-    secret_key = os.getenv("SECRET_KEY")
-    if not secret_key:
-        raise RuntimeError("SECRET_KEY environment variable is required")
-    app.config["SECRET_KEY"] = secret_key
+    app.config["SECRET_KEY"] = config.secret_key
     app.config["MAX_CONTENT_LENGTH"] = config.input_limits.max_file_size_mb * 1024 * 1024
 
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
