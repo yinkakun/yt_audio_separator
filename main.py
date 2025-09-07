@@ -151,6 +151,7 @@ class R2StorageSettings:
     bucket_name: str = field(
         default_factory=lambda: os.getenv("R2_BUCKET_NAME", "audio-separation")
     )
+    public_domain: str = field(default_factory=lambda: os.getenv("R2_PUBLIC_DOMAIN", ""))
 
 
 @dataclass
@@ -168,6 +169,7 @@ class Config:
             self.r2_storage.account_id
             and self.r2_storage.access_key_id
             and self.r2_storage.secret_access_key
+            and self.r2_storage.public_domain
         )
 
     def validate(self):
@@ -268,8 +270,16 @@ limiter = Limiter(
 
 
 class CloudflareR2:
-    def __init__(self, account_id: str, access_key: str, secret_key: str, bucket_name: str):
+    def __init__(
+        self,
+        account_id: str,
+        access_key: str,
+        secret_key: str,
+        bucket_name: str,
+        public_domain: str = "",
+    ):
         self.bucket_name = bucket_name
+        self.public_domain = public_domain
 
         self.client = boto3.client(
             "s3",
@@ -311,17 +321,11 @@ class CloudflareR2:
             logger.error("R2 delete error: %s", str(e))
             return False
 
-    def get_download_url(self, key: str, expires_in: int = 3600) -> Optional[str]:
-        if not self.client:
+    def get_download_url(self, key: str, public_domain: str = "") -> Optional[str]:
+        if not public_domain:
             return None
-        try:
-            url = self.client.generate_presigned_url(
-                "get_object", Params={"Bucket": self.bucket_name, "Key": key}, ExpiresIn=expires_in
-            )
-            return url
-        except (NoCredentialsError, ClientError) as e:
-            logger.error("R2 presigned URL error: %s", str(e))
-            return None
+        url = f"https://{public_domain}/{key}"
+        return url
 
 
 class WebhookManager:
@@ -398,6 +402,7 @@ r2_client = CloudflareR2(
     config.r2_storage.access_key_id,
     config.r2_storage.secret_access_key,
     config.r2_storage.bucket_name,
+    config.r2_storage.public_domain,
 )
 
 webhook_manager = WebhookManager(config.webhooks.url, config.webhooks.secret)
@@ -774,8 +779,10 @@ def create_result_dict(track_id: str, original_title: Optional[str]) -> Dict[str
         "track_id": track_id,
     }
 
-    vocals_url = r2_client.get_download_url(f"{track_id}/vocals.mp3", expires_in=86400)
-    instrumental_url = r2_client.get_download_url(f"{track_id}/instrumental.mp3", expires_in=86400)
+    vocals_url = r2_client.get_download_url(f"{track_id}/vocals.mp3", r2_client.public_domain)
+    instrumental_url = r2_client.get_download_url(
+        f"{track_id}/instrumental.mp3", r2_client.public_domain
+    )
 
     if vocals_url and instrumental_url:
         result["vocals_url"] = vocals_url
@@ -1042,7 +1049,12 @@ def validate_environment():
     if not config.R2_STORAGE:
         errors.append("R2 storage is required but not configured")
     else:
-        required_r2_vars = ["CLOUDFLARE_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
+        required_r2_vars = [
+            "CLOUDFLARE_ACCOUNT_ID",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+            "R2_PUBLIC_DOMAIN",
+        ]
         missing_r2_vars = [var for var in required_r2_vars if not os.getenv(var)]
         if missing_r2_vars:
             errors.append(

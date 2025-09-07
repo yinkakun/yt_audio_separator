@@ -42,6 +42,7 @@ SECRET_KEY=your_secret_key_here
 CLOUDFLARE_ACCOUNT_ID=your_cloudflare_account_id
 R2_ACCESS_KEY_ID=your_r2_access_key
 R2_SECRET_ACCESS_KEY=your_r2_secret_key
+R2_PUBLIC_DOMAIN=your_public_bucket_domain
 ```
 
 ### Optional
@@ -66,6 +67,7 @@ RATE_LIMIT_SEPARATION=5 per minute
 
 # Storage
 R2_BUCKET_NAME=audio-separation
+R2_PUBLIC_DOMAIN=your-public-domain.com  # Your R2 bucket's public domain for direct access
 
 # Webhooks (optional)
 WEBHOOK_URL=https://your-webhook-endpoint.com/webhook
@@ -75,12 +77,17 @@ WEBHOOK_MAX_RETRIES=3
 WEBHOOK_RETRY_DELAY=5
 ```
 
+## Cloudflare R2 Configuration
+
+1. In Cloudflare dashboard, go to R2 Object Storage
+2. Select your bucket and go to Settings
+3. Under "Public Access", enable public read access
+4. Set up a custom domain or use the public R2.dev URL
+
 ## API Endpoints
 
-### Start Audio Separation
-
 ```bash
-POST /separate
+POST /separate-audio
 ```
 
 **Request body:**
@@ -123,7 +130,7 @@ GET /status/<track_id>
 
 ```json
 {
-  "track_id": "uuid-here",
+  "track_id": "uuid",
   "status": "completed",
   "progress": 100,
   "created_at": 1234567890,
@@ -131,10 +138,8 @@ GET /status/<track_id>
   "processing_time": 30,
   "result": {
     "track_id": "uuid-here",
-    "original_title": "Song Title",
-    "message": "Audio separation completed successfully",
-    "vocals_url": "https://presigned-url-for-vocals.mp3",
-    "instrumental_url": "https://presigned-url-for-instrumental.mp3",
+    "vocals_url": "",
+    "instrumental_url": "",
   }
 }
 ```
@@ -169,7 +174,7 @@ GET /health
 ### Basic separation
 
 ```bash
-curl -X POST http://localhost:5500/separate \
+curl -X POST http://localhost:5500/separate-audio \
   -H "Content-Type: application/json" \
   -d '{"search_query": "Bohemian Rhapsody Queen"}'
 ```
@@ -203,10 +208,9 @@ Webhook payload example:
     "track_id": "uuid-here",
     "status": "completed",
     "result": {
-      "message": "Audio separation completed successfully",
+      "vocals_url": "",
+      "instrumental_url": ""
       "original_title": "Song Title",
-      "vocals_url": "https://presigned-url",
-      "instrumental_url": "https://presigned-url"
     }
   }
 }
