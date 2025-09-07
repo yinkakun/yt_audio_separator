@@ -1,141 +1,191 @@
+import asyncio
 import logging
 import time
-import uuid
-from functools import wraps
-from typing import Any, Optional, Tuple
 
-from flask import Blueprint, g, jsonify, request
-from flask_limiter.util import get_remote_address
+import uuid as uuid_module
+from typing import Any, Dict, Optional
+
+from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.models.job import JobStatus
-from app.utils.validation import sanitize_input, validate_track_id
+
+
+def sanitize_input(input_str: str, max_length: int) -> str:
+    if not isinstance(input_str, str):
+        raise ValueError("Input must be a string")
+
+    cleaned = input_str.strip()
+    if not cleaned:
+        raise ValueError("Input cannot be empty")
+
+    if len(cleaned) > max_length:
+        raise ValueError(f"Input too long (max {max_length} characters)")
+
+    return cleaned
+
+
+def validate_track_id(track_id: str) -> bool:
+    """Validate UUID format for track ID"""
+    try:
+        uuid_module.UUID(track_id)
+        return True
+    except (ValueError, TypeError):
+        return False
+
 
 logger = logging.getLogger(__name__)
 
-api_bp = Blueprint("api", __name__)
+
+class SeparationRequest(BaseModel):
+    search_query: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("search_query")
+    @classmethod
+    def validate_search_query(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("search_query must be a string")
+        return v.strip()
 
 
-def error_handler(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except ValueError as e:
-            logger.warning("Validation error in %s: %s", func.__name__, str(e))
-            return jsonify({"error": str(e)}), 400
-        except (RuntimeError, OSError, KeyError) as e:
-            logger.error("Error in %s: %s", func.__name__, str(e))
-            return jsonify({"error": "Internal server error"}), 500
-
-    return wrapper
+class JobStatusResponse(BaseModel):
+    track_id: str
+    status: str
+    progress: int
+    created_at: float
+    completed_at: Optional[float] = None
+    processing_time: Optional[float] = None
+    error: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
 
 
-def build_response(
-    track_id: str,
-    status: JobStatus,
-    message: str,
-    status_code: int = 200,
-):
-    response = {
-        "track_id": track_id,
-        "status": status.value,
-        "message": message,
-        "correlation_id": getattr(g, "correlation_id", "unknown"),
-    }
-    return jsonify(response), status_code
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: float
+    metrics: Dict[str, int]
+    services: Dict[str, bool]
 
 
-def validate_separation_request(config) -> Optional[Tuple[Any, int]]:
-    """Validate separation request and return error response if invalid"""
-    error_msg = None
-    status_code = 400
+def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook_manager):
+    app = FastAPI(
+        title="YouTube Audio Separator API",
+        description="API for separating audio tracks into vocals and instrumentals",
+        version="1.0.0",
+    )
 
-    if not request.is_json:
-        error_msg = "Content-Type must be application/json"
-    elif request.content_length and request.content_length > 1024:
-        error_msg = "Request payload too large"
-        status_code = 413
-    else:
-        try:
-            data = request.get_json()
-        except (ValueError, TypeError, UnicodeDecodeError):
-            error_msg = "Invalid JSON"
-        else:
-            if not data or not isinstance(data, dict):
-                error_msg = "Request body must be a JSON object"
-            elif "search_query" not in data:
-                error_msg = "Missing 'search_query' field"
-            else:
-                raw_query = data.get("search_query", "")
-                if not isinstance(raw_query, str):
-                    error_msg = "search_query must be a string"
-                else:
-                    try:
-                        sanitize_input(raw_query, config.input_limits.max_search_query_length)
-                    except ValueError as e:
-                        error_msg = f"Input validation failed: {str(e)}"
+    limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = limiter
 
-    if error_msg:
-        return jsonify({"error": error_msg}), status_code
-    return None
+    async def rate_limit_handler(request: Request, exc: Exception) -> Response:
+        if isinstance(exc, RateLimitExceeded):
+            return _rate_limit_exceeded_handler(request, exc)
+        raise exc
 
+    app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
-def create_routes(config, task_manager, audio_processor, r2_client, limiter):
-    @api_bp.route("/")
-    def read_root():
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "font-src 'self'; "
+            "object-src 'none'; "
+            "media-src 'self'; "
+            "frame-src 'none';"
+        )
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+        return response
+
+    @app.exception_handler(ValueError)
+    async def validation_exception_handler(_: Request, exc: ValueError):
+        logger.warning("Validation error: %s", str(exc))
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"error": str(exc)})
+
+    @app.exception_handler(Exception)
+    async def general_exception_handler(_: Request, exc: Exception):
+        logger.error("Unexpected error: %s", str(exc))
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal server error"},
+        )
+
+    @app.get("/")
+    async def read_root():
         return {
             "status": "healthy",
-            "service": "audio_separator",
-            "features": {"r2_storage": True, "webhooks": True},
         }
 
-    @api_bp.route("/separate", methods=["POST"])
-    @limiter.limit(config.rate_limits.separation)
-    @error_handler
-    def separate_audio():
-        """Start audio separation job - returns immediately with job ID"""
-        validation_error = validate_separation_request(config)
-        if validation_error:
-            return validation_error
-
+    @app.post("/separate-audio", status_code=status.HTTP_202_ACCEPTED)
+    @limiter.limit(config.rate_limits.requests)
+    async def separate_audio(request: SeparationRequest):
         if task_manager.count_active_jobs() >= config.processing.max_active_jobs:
-            return jsonify({"error": "Server busy. Please try again later."}), 429
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Server busy. Please try again later.",
+            )
 
-        data = request.get_json()
-        raw_query = data["search_query"]
-        search_query = sanitize_input(raw_query, config.input_limits.max_search_query_length)
+        try:
+            search_query = sanitize_input(
+                request.search_query, config.input_limits.max_search_query_length
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"Input validation failed: {str(e)}"
+            ) from e
 
-        track_id = str(uuid.uuid4())
+        track_id = str(uuid_module.uuid4())
         task_manager.update_job(track_id, JobStatus.PROCESSING, progress=0)
 
-        task_manager.submit_job(
-            audio_processor.process_audio_background,
-            track_id,
-            search_query,
-            config.input_limits.max_file_size_mb,
-            config.processing.timeout,
+        asyncio.create_task(
+            process_audio_background_async(
+                track_id,
+                search_query,
+                config,
+                task_manager,
+                audio_processor,
+                r2_client,
+                webhook_manager,
+            )
         )
 
-        correlation_id = getattr(g, "correlation_id", "unknown")
         logger.info(
-            "Accepted job %s (correlation: %s) for search query: %s",
+            "Accepted job %s for search query: %s",
             track_id,
-            correlation_id,
             search_query[:50] + ("..." if len(search_query) > 50 else ""),
         )
-        return build_response(track_id, JobStatus.PROCESSING, "Audio separation started", 202)
 
-    @api_bp.route("/status/<track_id>", methods=["GET"])
-    @limiter.limit("60 per minute")
-    def get_job_status(track_id: str):
+        return {
+            "track_id": track_id,
+            "status": JobStatus.PROCESSING.value,
+            "message": "Audio separation started",
+        }
+
+    @app.get("/status/{track_id}", response_model=JobStatusResponse)
+    async def get_job_status(track_id: str):
         if not validate_track_id(track_id):
-            return jsonify({"error": "Invalid track ID format"}), 400
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid track ID format"
+            )
 
         job = task_manager.get_job(track_id)
         if not job:
-            return jsonify({"error": "Job not found"}), 404
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-        response = {
+        response_data = {
             "track_id": track_id,
             "status": job.status.value,
             "progress": job.progress,
@@ -143,41 +193,105 @@ def create_routes(config, task_manager, audio_processor, r2_client, limiter):
         }
 
         if job.completed_at:
-            response["completed_at"] = job.completed_at
-            response["processing_time"] = job.completed_at - job.created_at
+            response_data["completed_at"] = job.completed_at
+            response_data["processing_time"] = job.completed_at - job.created_at
 
         if job.error:
-            response["error"] = job.error
+            response_data["error"] = job.error
         if job.result:
-            response["result"] = job.result
+            response_data["result"] = job.result
 
-        return jsonify(response)
+        return JobStatusResponse(**response_data)
 
-    @api_bp.route("/health", methods=["GET"])
-    def health_check():
-        """Health check endpoint"""
+    @app.get("/health", response_model=HealthResponse)
+    async def health_check():
         health_status = {
             "status": "healthy",
             "timestamp": time.time(),
-            "services": {
-                "separator": True,
-                "r2": True,
-                "webhooks": True,
-            },
             "metrics": {
                 "active_jobs": task_manager.count_active_jobs(),
-                "max_jobs": config.processing.max_active_jobs,
+                "max_active_jobs": config.processing.max_active_jobs,
+            },
+            "services": {
+                "r2_operational": False,
+                "r2_configured": r2_client.client is not None,
             },
         }
 
         if r2_client.client:
             try:
-                r2_client.client.head_bucket(Bucket=r2_client.bucket_name)
+                await r2_client.file_exists_async("_health_check")
                 health_status["services"]["r2_operational"] = True
-            except (OSError, RuntimeError) as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 health_status["services"]["r2_operational"] = False
                 logger.error("R2 health check failed: %s", e)
 
-        return jsonify(health_status)
+        return HealthResponse(**health_status)
 
-    return api_bp
+    return app
+
+
+async def process_audio_background_async(
+    track_id: str,
+    search_query: str,
+    config,
+    task_manager,
+    audio_processor,
+    r2_client,
+    webhook_manager,
+):
+    try:
+        loop = asyncio.get_event_loop()
+
+        task_manager.update_job(track_id, JobStatus.PROCESSING, progress=10)
+
+        downloaded_file = await loop.run_in_executor(
+            None,
+            audio_processor.download_audio_simple,
+            search_query,
+            config.input_limits.max_file_size_mb,
+        )
+
+        task_manager.update_job(track_id, JobStatus.PROCESSING, progress=40)
+
+        vocals_file, instrumental_file = await loop.run_in_executor(
+            None, audio_processor.separate_audio, downloaded_file
+        )
+
+        task_manager.update_job(track_id, JobStatus.PROCESSING, progress=70)
+
+        file_uploads = [
+            (vocals_file, f"{track_id}/vocals.mp3"),
+            (instrumental_file, f"{track_id}/instrumental.mp3"),
+        ]
+        upload_results = await r2_client.upload_files_parallel(file_uploads)
+
+        if not all(upload_results):
+            raise RuntimeError("Failed to upload audio files to R2")
+
+        vocals_url = r2_client.get_download_url(f"{track_id}/vocals.mp3", r2_client.public_domain)
+        instrumental_url = r2_client.get_download_url(
+            f"{track_id}/instrumental.mp3", r2_client.public_domain
+        )
+
+        result = {
+            "vocals_url": vocals_url,
+            "instrumental_url": instrumental_url,
+            "track_id": track_id,
+        }
+
+        task_manager.update_job(track_id, JobStatus.COMPLETED, progress=100, result=result)
+        await webhook_manager.notify_job_completed_async(track_id, result)
+        logger.info("Job %s completed successfully", track_id)
+
+    except (OSError, RuntimeError, ValueError, ConnectionError, TimeoutError) as e:
+        error_msg = str(e)
+        logger.error("Job %s failed: %s", track_id, error_msg)
+        task_manager.update_job(track_id, JobStatus.FAILED, error=error_msg)
+        await webhook_manager.notify_job_failed_async(track_id, error_msg)
+
+    except (ImportError, AttributeError, TypeError, MemoryError) as e:
+        error_msg = f"Unexpected error: {str(e)}"
+        logger.error("Job %s failed with unexpected error: %s", track_id, error_msg)
+        task_manager.update_job(track_id, JobStatus.FAILED, error=error_msg)
+        await webhook_manager.notify_job_failed_async(track_id, error_msg)

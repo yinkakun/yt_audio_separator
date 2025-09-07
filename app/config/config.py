@@ -33,7 +33,7 @@ class WebhookSettings(BaseModel):
     retry_delay: int
 
 
-class R2StorageSettings(BaseModel):
+class R2Config(BaseModel):
     account_id: str
     access_key_id: str
     secret_access_key: str
@@ -121,8 +121,8 @@ class Config(BaseSettings):
 
     @computed_field
     @property
-    def r2_storage(self) -> R2StorageSettings:
-        return R2StorageSettings(
+    def r2_storage(self) -> R2Config:
+        return R2Config(
             account_id=self.cloudflare_account_id,
             access_key_id=self.r2_access_key_id,
             secret_access_key=self.r2_secret_access_key,
@@ -141,7 +141,6 @@ class Config(BaseSettings):
         )
 
     def validate_for_production(self) -> None:
-        """Validate configuration"""
         if not self.secret_key:
             raise ValueError("SECRET_KEY must be configured")
 
@@ -149,4 +148,4 @@ class Config(BaseSettings):
             raise ValueError("R2 storage must be configured")
 
         if self.webhook_url and self.webhook_secret and len(self.webhook_secret) < 32:
-            raise ValueError("WEBHOOK_SECRET must be at least 32 characters for security")
+            raise ValueError("WEBHOOK_SECRET should be at least 32 characters long")

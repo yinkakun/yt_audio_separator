@@ -1,30 +1,41 @@
+import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
+from pydantic import BaseModel
 
+import aioboto3
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
 logger = logging.getLogger(__name__)
 
 
+class R2Storage(BaseModel):
+    account_id: str
+    access_key_id: str
+    secret_access_key: str
+    bucket_name: str
+    public_domain: str
+
+
 class CloudflareR2:
+
     def __init__(
         self,
-        account_id: str,
-        access_key: str,
-        secret_key: str,
-        bucket_name: str,
-        public_domain: str = "",
+        config: R2Storage,
     ):
-        self.bucket_name = bucket_name
-        self.public_domain = public_domain
+        self.account_id = config.account_id
+        self.access_key = config.access_key_id
+        self.secret_key = config.secret_access_key
+        self.bucket_name = config.bucket_name
+        self.client: Optional[Any] = None
 
         self.client = boto3.client(
             "s3",
-            endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
+            endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=self.access_key,
+            aws_secret_access_key=self.secret_key,
             region_name="auto",
         )
 
@@ -65,3 +76,51 @@ class CloudflareR2:
             return None
         url = f"https://{public_domain}/{key}"
         return url
+
+    async def upload_file_async(self, file_path: Path, key: str) -> bool:
+        session = aioboto3.Session()
+        try:
+            async with session.client(  # type: ignore[attr-defined]
+                "s3",
+                endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=self.access_key,
+                aws_secret_access_key=self.secret_key,
+                region_name="auto",
+            ) as client:
+                await client.upload_file(
+                    str(file_path), self.bucket_name, key, ExtraArgs={"ContentType": "audio/mpeg"}
+                )
+                logger.info("Uploaded %s to R2 as %s (async)", file_path, key)
+                return True
+        except (NoCredentialsError, ClientError, OSError, FileNotFoundError) as e:
+            logger.error("R2 async upload error: %s", str(e))
+            return False
+
+    async def upload_files_parallel(self, file_uploads: list[tuple[Path, str]]) -> list[bool]:
+        upload_tasks = [self.upload_file_async(file_path, key) for file_path, key in file_uploads]
+        results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+
+        final_results = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("Parallel upload exception: %s", str(result))
+                final_results.append(False)
+            else:
+                final_results.append(result)
+
+        return final_results
+
+    async def file_exists_async(self, key: str) -> bool:
+        session = aioboto3.Session()
+        try:
+            async with session.client(  # type: ignore[attr-defined]
+                "s3",
+                endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=self.access_key,
+                aws_secret_access_key=self.secret_key,
+                region_name="auto",
+            ) as client:
+                await client.head_object(Bucket=self.bucket_name, Key=key)
+                return True
+        except ClientError:
+            return False

@@ -17,9 +17,10 @@ class FileManager:
 
     @staticmethod
     def cleanup_track_files(track_id: str, r2_client=None):
+        if not r2_client:
+            return
+
         try:
-            if not r2_client:
-                return
             for track_type in TrackType:
                 r2_key = f"{track_id}/{track_type.value}.mp3"
                 try:
@@ -36,15 +37,19 @@ class FileManager:
         instrumental_file = None
 
         for file_path in output_dir.iterdir():
-            if file_path.is_file():
-                filename = file_path.name.lower()
-                for track_type, patterns in FileManager.TRACK_PATTERNS.items():
-                    if any(pattern.lower() in filename for pattern in patterns):
-                        if track_type == TrackType.VOCALS:
-                            vocals_file = file_path
-                        else:
-                            instrumental_file = file_path
-                        break
+            if not file_path.is_file():
+                continue
+
+            filename = file_path.name.lower()
+            for track_type, patterns in FileManager.TRACK_PATTERNS.items():
+                if not any(pattern.lower() in filename for pattern in patterns):
+                    continue
+
+                if track_type == TrackType.VOCALS:
+                    vocals_file = file_path
+                else:
+                    instrumental_file = file_path
+                break
 
         return vocals_file, instrumental_file
 
@@ -60,4 +65,21 @@ class FileManager:
             return vocals_uploaded and instrumental_uploaded
         except (OSError, ClientError, NoCredentialsError) as e:
             logger.error("Failed to upload to R2: %s", e)
+            return False
+
+    @staticmethod
+    async def upload_to_r2_async(
+        track_id: str, vocals_file: Path, instrumental_file: Path, r2_client
+    ) -> bool:
+        try:
+            vocals_key = f"{track_id}/vocals.mp3"
+            instrumental_key = f"{track_id}/instrumental.mp3"
+
+            file_uploads = [(vocals_file, vocals_key), (instrumental_file, instrumental_key)]
+
+            upload_results = await r2_client.upload_files_parallel(file_uploads)
+            return all(upload_results)
+
+        except (OSError, ClientError, NoCredentialsError) as e:
+            logger.error("Failed to upload to R2 (async): %s", e)
             return False

@@ -1,25 +1,14 @@
 import logging
-import os
-import secrets
-import sys
-import threading
 
-from flask import Flask, g
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from werkzeug.middleware.proxy_fix import ProxyFix
+from fastapi import FastAPI
 
-from app.api.routes import create_routes
-from app.config.settings import Config
+from app.api.routes import create_fastapi_app
+from app.config.config import Config
 from app.services.audio_processor import AudioProcessor
-from app.services.storage import CloudflareR2
+from app.services.storage import CloudflareR2, R2Storage
 from app.services.task_manager import TaskManager
 from app.services.webhook import WebhookManager
-from app.utils.cleanup import CleanupManager
-from app.utils.logging_config import setup_logging
-
-from app.models.job import JobStatus
-from app.services.file_manager import FileManager
+from app.config.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -62,103 +51,30 @@ def validate_environment(config):
     return warnings
 
 
-def create_app():
-    """Application factory"""
+def create_app() -> FastAPI:
     config = Config()
     config.validate_for_production()
 
     setup_logging(config.server.debug)
 
-    app = Flask(__name__)
-
-    app.config["SECRET_KEY"] = config.secret_key
-    app.config["MAX_CONTENT_LENGTH"] = config.input_limits.max_file_size_mb * 1024 * 1024
-
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-
     r2_client = CloudflareR2(
-        config.r2_storage.account_id,
-        config.r2_storage.access_key_id,
-        config.r2_storage.secret_access_key,
-        config.r2_storage.bucket_name,
-        config.r2_storage.public_domain,
-    )
-
-    webhook_manager = WebhookManager(config.webhooks.url, config.webhooks.secret)
-    task_manager = TaskManager()
-    audio_processor = AudioProcessor(task_manager, r2_client, webhook_manager)
-    cleanup_manager = CleanupManager()
-
-    limiter = Limiter(
-        app=app, key_func=get_remote_address, default_limits=[config.rate_limits.requests]
-    )
-
-    api_bp = create_routes(config, task_manager, audio_processor, r2_client, limiter)
-    app.register_blueprint(api_bp)
-
-    @app.after_request
-    def after_request(response):
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
-            "connect-src 'self'; "
-            "font-src 'self'; "
-            "object-src 'none'; "
-            "media-src 'self'; "
-            "frame-src 'none';"
+        config=R2Storage(
+            account_id=config.r2_storage.account_id,
+            bucket_name=config.r2_storage.bucket_name,
+            public_domain=config.r2_storage.public_domain,
+            access_key_id=config.r2_storage.access_key_id,
+            secret_access_key=config.r2_storage.secret_access_key,
         )
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+    )
 
-        if hasattr(g, "correlation_id"):
-            response.headers["X-Correlation-ID"] = g.correlation_id
+    task_manager = TaskManager(max_workers=config.processing.max_active_jobs)
+    webhook_manager = WebhookManager(config.webhooks.url, config.webhooks.secret)
+    audio_processor = AudioProcessor(
+        r2_client,
+        webhook_manager,
+        task_manager,
+    )
 
-        return response
-
-    @app.before_request
-    def before_request():
-        g.correlation_id = secrets.token_hex(8)
-
-        if cleanup_manager.should_cleanup():
-            threading.Thread(target=task_manager.cleanup_expired, daemon=True).start()
-
-    def cleanup_resources():
-        """Clean up application resources on shutdown"""
-        logger.info("Shutting down...")
-        logger.info("Cleaning up task manager resources...")
-        try:
-            task_manager.cleanup_resources()
-        except (RuntimeError, OSError) as e:
-            logger.error("Error cleaning up task manager: %s", str(e))
-
-        logger.info("Cleaning up cloud storage files...")
-        try:
-
-            for job in task_manager.get_all_jobs().values():
-                if job.status == JobStatus.PROCESSING:
-                    FileManager.cleanup_track_files(job.track_id, r2_client)
-        except (RuntimeError, OSError, AttributeError) as e:
-            logger.error("Error during cleanup: %s", str(e))
-
-    def signal_handler(signum, _):
-        """Handle shutdown signals"""
-        logger.info("Received shutdown signal %s", signum)
-        try:
-            cleanup_resources()
-        except (RuntimeError, OSError) as e:
-            logger.error("Error during shutdown: %s", str(e))
-        finally:
-            sys.exit(0)
-
-    app.config["task_manager"] = task_manager
-    app.config["cleanup_resources"] = cleanup_resources
-    app.config["signal_handler"] = signal_handler
+    app = create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook_manager)
 
     return app
