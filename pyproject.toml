@@ -11,10 +11,17 @@ dependencies = [
     "librosa>=0.10.0",
     "audio-separator>=0.36.1",
     "onnxruntime>=1.22.1",
+    "dotenv>=0.9.9",
+    "boto3>=1.40.25",
+    "validators>=0.35.0",
 ]
 
 [dependency-groups]
-dev = ["black>=25.1.0", "isort>=6.0.1", "pylint>=3.3.8"]
+dev = [
+    "black>=25.1.0",
+    "isort>=6.0.1",
+    "pylint>=3.3.8",
+]
 
 [tool.black]
 line-length = 100
