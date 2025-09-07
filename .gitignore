@@ -1,8 +1,9 @@
 __pycache__/
 .venv/
-separated_tracks/
 *.wav
 *.mp3
 .env
 *.log
 .DS_Store
+logs/
+.claude/
