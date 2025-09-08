@@ -10,8 +10,8 @@ import yt_dlp
 from yt_dlp.utils import DownloadError, ExtractorError
 from audio_separator.separator import Separator
 
-from app.models.job import JobStatus
-from app.services.file_manager import FileManager
+from src.models.job import JobStatus
+from src.services.file_manager import FileManager
 
 logger = logging.getLogger(__name__)
 
