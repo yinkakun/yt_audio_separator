@@ -6,13 +6,13 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    server_settings = Config()
+    config = Config()
 
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=server_settings.server.port,
-        reload=server_settings.server.debug,
+        port=config.server.port,
+        reload=config.server.debug,
         log_level="info",
         access_log=True,
     )
