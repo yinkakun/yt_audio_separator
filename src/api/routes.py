@@ -88,6 +88,14 @@ def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook
 
     app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
+    )
+
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
         response = await call_next(request)
@@ -111,27 +119,34 @@ def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook
         return response
 
     @app.exception_handler(ValueError)
-    async def validation_exception_handler(_: Request, exc: ValueError):
+    async def validation_exception_handler(_, exc: ValueError):
         logger.warning("Validation error: %s", str(exc))
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"error": str(exc)})
 
     @app.exception_handler(Exception)
     async def general_exception_handler(_: Request, exc: Exception):
-        logger.error("Unexpected error: %s", str(exc))
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal server error"},
-        )
+        try:
+            logger.error("Unexpected error: %s", str(exc))
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "Internal server error"},
+            )
+        except Exception as handler_exc:  # pylint: disable=broad-except
+            logger.error("Exception handler failed: %s", str(handler_exc))
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "Internal server error"},
+            )
 
     @app.get("/")
     async def read_root():
         return {
-            "status": "healthy",
+            "status": "ok",
         }
 
     @app.post("/separate-audio", status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(config.rate_limits.requests)
-    async def separate_audio(request: SeparationRequest):
+    async def separate_audio(request: Request, separation_request: SeparationRequest):
         if task_manager.count_active_jobs() >= config.processing.max_active_jobs:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -140,7 +155,7 @@ def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook
 
         try:
             search_query = sanitize_input(
-                request.search_query, config.input_limits.max_search_query_length
+                separation_request.search_query, config.input_limits.max_search_query_length
             )
         except ValueError as e:
             raise HTTPException(
@@ -239,7 +254,7 @@ async def process_audio_background_async(
     audio_processor,
     r2_client,
     webhook_manager,
-):
+) -> None:
     try:
         loop = asyncio.get_event_loop()
 
