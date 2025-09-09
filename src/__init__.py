@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
 
     r2_client = CloudflareR2(
         config=R2Storage(
-            account_id=config.r2_storage.account_id,
+            s3_url=f"https://{config.cloudflare_account_id}.r2.cloudflarestorage.com",
             bucket_name=config.r2_storage.bucket_name,
             public_domain=config.r2_storage.public_domain,
             access_key_id=config.r2_storage.access_key_id,

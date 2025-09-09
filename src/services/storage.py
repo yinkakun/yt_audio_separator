@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class R2Storage(BaseModel):
-    account_id: str
+    s3_url: str
     access_key_id: str
     secret_access_key: str
     bucket_name: str
@@ -25,15 +25,16 @@ class CloudflareR2:
         self,
         config: R2Storage,
     ):
-        self.account_id = config.account_id
+        self.s3_url = config.s3_url
         self.access_key = config.access_key_id
         self.secret_key = config.secret_access_key
         self.bucket_name = config.bucket_name
+        self.public_domain = config.public_domain
         self.client: Optional[Any] = None
 
         self.client = boto3.client(
             "s3",
-            endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
+            endpoint_url=self.s3_url,
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             region_name="auto",
@@ -82,7 +83,7 @@ class CloudflareR2:
         try:
             async with session.client(  # type: ignore[attr-defined]
                 "s3",
-                endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
+                endpoint_url=self.s3_url,
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key,
                 region_name="auto",
@@ -115,7 +116,7 @@ class CloudflareR2:
         try:
             async with session.client(  # type: ignore[attr-defined]
                 "s3",
-                endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
+                endpoint_url=self.s3_url,
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key,
                 region_name="auto",
