@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 
 from botocore.exceptions import ClientError, NoCredentialsError
 
-from src.models.job import TrackType
+from models.job import TrackType
 
 logger = logging.getLogger(__name__)
 

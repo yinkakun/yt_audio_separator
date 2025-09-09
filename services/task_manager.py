@@ -5,8 +5,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 
-from src.models.job import JobStatus, ProcessingJob
-from src.services.file_manager import FileManager
+from models.job import JobStatus, ProcessingJob
+from services.file_manager import FileManager
 
 logger = logging.getLogger(__name__)
 

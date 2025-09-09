@@ -196,5 +196,5 @@ uv run isort .
 **Lint:**
 
 ```bash
-uv run pylint src/
+uv run pylint .
 ```

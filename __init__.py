@@ -2,13 +2,13 @@ import logging
 
 from fastapi import FastAPI
 
-from src.api.routes import create_fastapi_app
-from src.config.config import Config
-from src.services.audio_processor import AudioProcessor
-from src.services.storage import CloudflareR2, R2Storage
-from src.services.task_manager import TaskManager
-from src.services.webhook import WebhookManager
-from src.config.logging_config import setup_logging
+from api.routes import create_fastapi_app
+from config.config import Config
+from services.audio_processor import AudioProcessor
+from services.storage import CloudflareR2, R2Storage
+from services.task_manager import TaskManager
+from services.webhook import WebhookManager
+from config.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
