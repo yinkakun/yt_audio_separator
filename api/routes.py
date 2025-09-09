@@ -1,6 +1,7 @@
 import asyncio
 import time
 import uuid as uuid_module
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -71,10 +72,18 @@ class HealthResponse(BaseModel):
 
 
 def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook_manager):
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup
+        yield
+        # Shutdown
+        await r2_client.close()
+
     app = FastAPI(
         title="YouTube Audio Separator API",
         description="API for separating audio tracks into vocals and instrumentals",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     limiter = Limiter(key_func=get_remote_address)

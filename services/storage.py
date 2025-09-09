@@ -60,7 +60,7 @@ class CloudflareR2:
                 retries={"max_attempts": 3, "mode": "adaptive"},
             )
             self._session = aioboto3.Session()
-        except Exception as e:
+        except (ValueError, OSError, RuntimeError) as e:
             logger.error("Failed to initialize R2 connection pool config: %s", str(e))
             self._config = None
             self._session = aioboto3.Session()
@@ -77,7 +77,7 @@ class CloudflareR2:
                     enable_cleanup_closed=True,
                 )
                 logger.info("Created R2 async connector")
-            except Exception as e:
+            except (ValueError, OSError, RuntimeError) as e:
                 logger.error("Failed to create R2 async connector: %s", str(e))
                 self._connector = None
 
@@ -85,8 +85,7 @@ class CloudflareR2:
         if self._connector:
             try:
                 await self._connector.close()
-                logger.info("Closed R2 connection pool")
-            except Exception as e:
+            except (OSError, RuntimeError) as e:
                 logger.error("Error closing R2 connection pool: %s", str(e))
             finally:
                 self._connector = None
