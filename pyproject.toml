@@ -21,6 +21,7 @@ dependencies = [
     "pydantic-settings>=2.10.1",
     "slowapi>=0.1.9",
     "structlog>=25.4.0",
+    "aiobotocore>=2.24.0",
 ]
 
 [dependency-groups]

@@ -2370,6 +2370,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aioboto3" },
+    { name = "aiobotocore" },
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "audio-separator" },
@@ -2399,6 +2400,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=15.1.0" },
+    { name = "aiobotocore", specifier = ">=2.24.0" },
     { name = "aiofiles", specifier = ">=24.1.0" },
     { name = "aiohttp", specifier = ">=3.11.0" },
     { name = "audio-separator", specifier = ">=0.36.1" },
