@@ -1,12 +1,12 @@
-import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
 from botocore.exceptions import ClientError, NoCredentialsError
 
+from config.logging_config import get_logger
 from models.job import TrackType
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class FileManager:

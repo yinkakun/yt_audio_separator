@@ -1,18 +1,17 @@
 import asyncio
-import logging
 import time
-
 import uuid as uuid_module
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
+from config.logging_config import get_logger
 from models.job import JobStatus
 
 
@@ -39,7 +38,7 @@ def validate_track_id(track_id: str) -> bool:
         return False
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class SeparationRequest(BaseModel):

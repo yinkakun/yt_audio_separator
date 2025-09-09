@@ -1,4 +1,3 @@
-import logging
 import shutil
 import tempfile
 import threading
@@ -11,10 +10,11 @@ import yt_dlp
 from audio_separator.separator import Separator
 from yt_dlp.utils import DownloadError, ExtractorError
 
+from config.logging_config import get_logger
 from models.job import JobStatus
 from services.file_manager import FileManager
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class JobProgressTracker(Protocol):
@@ -52,7 +52,7 @@ class DefaultSeparatorProvider:
                 return self._separator
 
             try:
-                logger.info("Initializing separator model")
+                logger.info("Initializing separator model", model="UVR-MDX-NET-Voc_FT.onnx")
                 self._separator = Separator(
                     output_format="mp3",
                     normalization_threshold=0.9,
@@ -66,16 +66,26 @@ class DefaultSeparatorProvider:
                     },
                 )
                 self._separator.load_model(model_filename="UVR-MDX-NET-Voc_FT.onnx")
-                logger.info("Separator model initialized successfully")
+                logger.info(
+                    "Separator model initialized successfully", model="UVR-MDX-NET-Voc_FT.onnx"
+                )
                 return self._separator
             except (ImportError, RuntimeError, OSError) as e:
-                logger.error("Failed to initialize separator model: %s", str(e))
+                logger.error(
+                    "Failed to initialize separator model",
+                    error=str(e),
+                    model="UVR-MDX-NET-Voc_FT.onnx",
+                )
                 self._separator = None
                 raise RuntimeError(f"Cannot initialize audio separator: {str(e)}") from e
 
     def get_separator_with_output_dir(self, output_dir: str) -> Separator:
         try:
-            logger.info("Creating separator with output_dir: %s", output_dir)
+            logger.info(
+                "Creating separator with custom output_dir",
+                output_dir=output_dir,
+                model="UVR-MDX-NET-Voc_FT.onnx",
+            )
             separator = Separator(
                 output_dir=output_dir,
                 output_format="mp3",
@@ -90,10 +100,19 @@ class DefaultSeparatorProvider:
                 },
             )
             separator.load_model(model_filename="UVR-MDX-NET-Voc_FT.onnx")
-            logger.info("Separator with custom output_dir initialized successfully")
+            logger.info(
+                "Separator with custom output_dir initialized successfully",
+                output_dir=output_dir,
+                model="UVR-MDX-NET-Voc_FT.onnx",
+            )
             return separator
         except (ImportError, RuntimeError, OSError) as e:
-            logger.error("Failed to initialize separator with output_dir: %s", str(e))
+            logger.error(
+                "Failed to initialize separator with custom output_dir",
+                error=str(e),
+                output_dir=output_dir,
+                model="UVR-MDX-NET-Voc_FT.onnx",
+            )
             raise RuntimeError(f"Cannot initialize audio separator: {str(e)}") from e
 
     @property
@@ -144,7 +163,12 @@ class AudioProcessor:
             if self.progress_tracker:
                 self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=10)
 
-            logger.info("[track=%s] Downloading audio", track_id)
+            logger.info(
+                "Downloading audio",
+                track_id=track_id,
+                query=search_query,
+                max_size_mb=max_file_size_mb,
+            )
             downloaded_file, original_title = self.download_audio(
                 temp_dir, search_query, max_file_size_mb
             )
@@ -152,7 +176,7 @@ class AudioProcessor:
             if self.progress_tracker:
                 self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=40)
 
-            logger.info("[track=%s] Separating audio", track_id)
+            logger.info("Separating audio", track_id=track_id, timeout=timeout_value)
             vocals_file, instrumental_file = self.separate_audio_tracks(
                 temp_dir, downloaded_file, track_id, timeout_value
             )
@@ -160,7 +184,7 @@ class AudioProcessor:
             if self.progress_tracker:
                 self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=80)
 
-            logger.info("[track=%s] Uploading to R2", track_id)
+            logger.info("Uploading separated tracks to R2", track_id=track_id)
             FileManager.upload_to_r2(track_id, vocals_file, instrumental_file, self.r2_client)
 
             result = self.create_result_dict(track_id, original_title)
@@ -173,7 +197,9 @@ class AudioProcessor:
 
         except (RuntimeError, OSError, FileNotFoundError, ValueError, TimeoutError) as e:
             error_msg = str(e)
-            logger.error("[track=%s] Error: %s", track_id, error_msg)
+            logger.error(
+                "Audio processing failed", track_id=track_id, error=error_msg, query=search_query
+            )
             if self.progress_tracker:
                 self.progress_tracker.update_job(
                     track_id, JobStatus.FAILED, progress=0, error=error_msg
@@ -330,9 +356,10 @@ class AudioProcessor:
         if not vocals_file or not instrumental_file:
             available_files = [f.name for f in output_dir.iterdir() if f.is_file()]
             logger.error(
-                "[track=%s] Could not find separated tracks. Found files: %s",
-                track_id,
-                available_files,
+                "Could not find separated tracks after separation",
+                track_id=track_id,
+                available_files=available_files,
+                output_dir=str(output_dir),
             )
             raise FileNotFoundError(
                 f"Could not find separated tracks. Found files: {available_files}"

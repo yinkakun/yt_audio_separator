@@ -1,14 +1,15 @@
 import asyncio
-import logging
 from pathlib import Path
-from typing import Optional, Any
-from pydantic import BaseModel
+from typing import Any, Optional
 
 import aioboto3
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
+from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+from config.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class R2Storage(BaseModel):

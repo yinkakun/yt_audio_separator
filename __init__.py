@@ -1,16 +1,14 @@
-import logging
-
 from fastapi import FastAPI
 
 from api.routes import create_fastapi_app
 from config.config import Config
+from config.logging_config import get_logger, setup_logging
 from services.audio_processor import AudioProcessor
 from services.storage import CloudflareR2, R2Storage
 from services.task_manager import TaskManager
 from services.webhook import WebhookManager
-from config.logging_config import setup_logging
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def validate_environment(config):

@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import hmac
 import json
-import logging
 import threading
 import time
 from typing import Any, Dict
@@ -10,7 +9,9 @@ from typing import Any, Dict
 import aiohttp
 import requests
 
-logger = logging.getLogger(__name__)
+from config.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class WebhookManager:

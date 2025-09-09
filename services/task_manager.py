@@ -1,14 +1,14 @@
 import asyncio
-import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 
+from config.logging_config import get_logger
 from models.job import JobStatus, ProcessingJob
 from services.file_manager import FileManager
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class TaskManager:
