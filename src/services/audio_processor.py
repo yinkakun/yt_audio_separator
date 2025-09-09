@@ -2,13 +2,14 @@ import logging
 import shutil
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Protocol
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from typing import Dict, Optional, Protocol, Tuple
 
 import yt_dlp
-from yt_dlp.utils import DownloadError, ExtractorError
 from audio_separator.separator import Separator
+from yt_dlp.utils import DownloadError, ExtractorError
 
 from src.models.job import JobStatus
 from src.services.file_manager import FileManager
@@ -30,6 +31,8 @@ class JobProgressTracker(Protocol):
 
 class SeparatorProvider(Protocol):
     def get_separator(self) -> Separator: ...
+
+    def get_separator_with_output_dir(self, output_dir: str) -> Separator: ...
 
     @property
     def separator_lock(self) -> threading.Lock: ...
@@ -69,6 +72,29 @@ class DefaultSeparatorProvider:
                 logger.error("Failed to initialize separator model: %s", str(e))
                 self._separator = None
                 raise RuntimeError(f"Cannot initialize audio separator: {str(e)}") from e
+
+    def get_separator_with_output_dir(self, output_dir: str) -> Separator:
+        try:
+            logger.info("Creating separator with output_dir: %s", output_dir)
+            separator = Separator(
+                output_dir=output_dir,
+                output_format="mp3",
+                normalization_threshold=0.9,
+                amplification_threshold=0.9,
+                mdx_params={
+                    "hop_length": 512,
+                    "segment_size": 128,
+                    "overlap": 0.25,
+                    "batch_size": 1,
+                    "enable_denoise": False,
+                },
+            )
+            separator.load_model(model_filename="UVR-MDX-NET-Voc_FT.onnx")
+            logger.info("Separator with custom output_dir initialized successfully")
+            return separator
+        except (ImportError, RuntimeError, OSError) as e:
+            logger.error("Failed to initialize separator with output_dir: %s", str(e))
+            raise RuntimeError(f"Cannot initialize audio separator: {str(e)}") from e
 
     @property
     def separator_lock(self) -> threading.Lock:
@@ -274,20 +300,18 @@ class AudioProcessor:
         self,
         temp_dir: Path,
         audio_file: Path,
-        track_id: Optional[str] = None,
+        track_id: str,
         processing_timeout: int = 300,
     ) -> Tuple[Path, Path]:
         output_dir = temp_dir / "separated"
         output_dir.mkdir(exist_ok=True, parents=True)
 
         try:
-            if track_id and self.progress_tracker:
+            if self.progress_tracker:
                 self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=50)
 
-            separator = self.separator_provider.get_separator()
-
             with self.separator_provider.separator_lock:
-                separator.output_dir = str(output_dir)
+                separator = self.separator_provider.get_separator_with_output_dir(str(output_dir))
 
                 run_with_timeout(
                     separator.separate,
@@ -305,6 +329,11 @@ class AudioProcessor:
 
         if not vocals_file or not instrumental_file:
             available_files = [f.name for f in output_dir.iterdir() if f.is_file()]
+            logger.error(
+                "[track=%s] Could not find separated tracks. Found files: %s",
+                track_id,
+                available_files,
+            )
             raise FileNotFoundError(
                 f"Could not find separated tracks. Found files: {available_files}"
             )
@@ -326,9 +355,9 @@ class AudioProcessor:
         temp_dir.mkdir(exist_ok=True, parents=True)
 
         try:
-            separator = Separator()
-            separator.output_dir = str(temp_dir)
-            separator.separate(str(audio_file))
+            with self.separator_provider.separator_lock:
+                separator = self.separator_provider.get_separator_with_output_dir(str(temp_dir))
+                separator.separate(str(audio_file))
 
             vocals_file, instrumental_file = FileManager.detect_separated_files(temp_dir)
 
