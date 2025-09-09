@@ -36,13 +36,17 @@ class FileManager:
         vocals_file = None
         instrumental_file = None
 
-        for file_path in output_dir.iterdir():
+        all_files = list(output_dir.iterdir())
+
+        for file_path in all_files:
             if not file_path.is_file():
                 continue
 
             filename = file_path.name.lower()
+
             for track_type, patterns in FileManager.TRACK_PATTERNS.items():
-                if not any(pattern.lower() in filename for pattern in patterns):
+                matching_patterns = [pattern for pattern in patterns if pattern.lower() in filename]
+                if not matching_patterns:
                     continue
 
                 if track_type == TrackType.VOCALS:
@@ -50,7 +54,6 @@ class FileManager:
                 else:
                     instrumental_file = file_path
                 break
-
         return vocals_file, instrumental_file
 
     @staticmethod
