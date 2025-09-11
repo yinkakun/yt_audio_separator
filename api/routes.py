@@ -73,7 +73,8 @@ class HealthResponse(BaseModel):
 
 def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook_manager):
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(_app: FastAPI):
+        audio_processor.initialize_model()
         # Startup
         yield
         # Shutdown
@@ -180,7 +181,6 @@ def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook
                 config,
                 task_manager,
                 audio_processor,
-                r2_client,
                 webhook_manager,
             )
         )
@@ -260,61 +260,26 @@ async def process_audio_background_async(
     config,
     task_manager,
     audio_processor,
-    r2_client,
     webhook_manager,
 ) -> None:
     try:
         loop = asyncio.get_event_loop()
 
-        task_manager.update_job(track_id, JobStatus.PROCESSING, progress=10)
-
-        downloaded_file = await loop.run_in_executor(
+        await loop.run_in_executor(
             None,
-            audio_processor.download_audio_simple,
+            audio_processor.process_audio,
+            track_id,
             search_query,
             config.input_limits.max_file_size_mb,
+            (
+                config.processing.processing_timeout
+                if hasattr(config.processing, "processing_timeout")
+                else None
+            ),
         )
 
-        task_manager.update_job(track_id, JobStatus.PROCESSING, progress=40)
-
-        vocals_file, instrumental_file = await loop.run_in_executor(
-            None, audio_processor.separate_audio, downloaded_file
-        )
-
-        task_manager.update_job(track_id, JobStatus.PROCESSING, progress=70)
-
-        file_uploads = [
-            (vocals_file, f"{track_id}/vocals.mp3"),
-            (instrumental_file, f"{track_id}/instrumental.mp3"),
-        ]
-        upload_results = await r2_client.upload_files_parallel(file_uploads)
-
-        if not all(upload_results):
-            raise RuntimeError("Failed to upload audio files to R2")
-
-        vocals_url = r2_client.get_download_url(f"{track_id}/vocals.mp3", r2_client.public_domain)
-        instrumental_url = r2_client.get_download_url(
-            f"{track_id}/instrumental.mp3", r2_client.public_domain
-        )
-
-        result = {
-            "vocals_url": vocals_url,
-            "instrumental_url": instrumental_url,
-            "track_id": track_id,
-        }
-
-        task_manager.update_job(track_id, JobStatus.COMPLETED, progress=100, result=result)
-        await webhook_manager.notify_job_completed_async(track_id, result)
-        logger.info("Job %s completed successfully", track_id)
-
-    except (OSError, RuntimeError, ValueError, ConnectionError, TimeoutError) as e:
+    except Exception as e:
         error_msg = str(e)
         logger.error("Job %s failed: %s", track_id, error_msg)
-        task_manager.update_job(track_id, JobStatus.FAILED, error=error_msg)
-        await webhook_manager.notify_job_failed_async(track_id, error_msg)
-
-    except (ImportError, AttributeError, TypeError, MemoryError) as e:
-        error_msg = f"Unexpected error: {str(e)}"
-        logger.error("Job %s failed with unexpected error: %s", track_id, error_msg)
         task_manager.update_job(track_id, JobStatus.FAILED, error=error_msg)
         await webhook_manager.notify_job_failed_async(track_id, error_msg)

@@ -1,6 +1,7 @@
+import os
 import shutil
-import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
@@ -15,6 +16,16 @@ from models.job import JobStatus
 from services.file_manager import FileManager
 
 logger = get_logger(__name__)
+
+MODEL_FILENAME = "UVR-MDX-NET-Voc_FT.onnx"
+
+mdx_params = {
+    "hop_length": 1024,
+    "segment_size": 256,
+    "overlap": 0.25,
+    "batch_size": 1,
+    "enable_denoise": False,
+}
 
 
 class JobProgressTracker(Protocol):
@@ -32,7 +43,7 @@ class JobProgressTracker(Protocol):
 class SeparatorProvider(Protocol):
     def get_separator(self) -> Separator: ...
 
-    def get_separator_with_output_dir(self, output_dir: str) -> Separator: ...
+    def initialize_model(self) -> None: ...
 
     @property
     def separator_lock(self) -> threading.Lock: ...
@@ -42,6 +53,46 @@ class DefaultSeparatorProvider:
     def __init__(self):
         self._separator: Optional[Separator] = None
         self._separator_lock = threading.Lock()
+        self.model_load_timeout = 60 * 15  # 15 minutes
+        self.working_dir = Path("audio_workspace")
+
+    def initialize_model(self) -> None:
+        with self._separator_lock:
+            if self._separator is not None:
+                return
+
+            try:
+                logger.info("Preloading separator model on startup", model=MODEL_FILENAME)
+                self._separator = self._create_separator()
+                # Load the model explicitly
+                self._separator.load_model(model_filename=MODEL_FILENAME)
+                logger.info("Separator model preloaded successfully", model=MODEL_FILENAME)
+            except (ImportError, RuntimeError, OSError) as e:
+                logger.error(
+                    "Failed to preload separator model on startup",
+                    error=str(e),
+                    model=MODEL_FILENAME,
+                )
+                self._separator = None
+                raise RuntimeError(f"Cannot preload audio separator: {str(e)}") from e
+
+    def _create_separator(self) -> Separator:
+        separator_config = {
+            "output_dir": str(self.working_dir.resolve()),
+            "output_format": "WAV",
+            "output_bitrate": "320k",
+            "normalization_threshold": 0.9,
+            "amplification_threshold": 0.9,
+            "mdx_params": mdx_params,
+        }
+
+        try:
+            separator = Separator(**separator_config)
+            logger.info("Separator created successfully with config", config=separator_config)
+            return separator
+        except Exception as e:
+            logger.error("Failed to create separator", error=str(e), config=separator_config)
+            raise
 
     def get_separator(self) -> Separator:
         if self._separator is not None:
@@ -52,68 +103,12 @@ class DefaultSeparatorProvider:
                 return self._separator
 
             try:
-                logger.info("Initializing separator model", model="UVR-MDX-NET-Voc_FT.onnx")
-                self._separator = Separator(
-                    output_format="mp3",
-                    normalization_threshold=0.9,
-                    amplification_threshold=0.9,
-                    mdx_params={
-                        "hop_length": 512,
-                        "segment_size": 128,
-                        "overlap": 0.25,
-                        "batch_size": 1,
-                        "enable_denoise": False,
-                    },
-                )
-                self._separator.load_model(model_filename="UVR-MDX-NET-Voc_FT.onnx")
-                logger.info(
-                    "Separator model initialized successfully", model="UVR-MDX-NET-Voc_FT.onnx"
-                )
+                self._separator = self._create_separator()
+                self._separator.load_model(model_filename=MODEL_FILENAME)
                 return self._separator
             except (ImportError, RuntimeError, OSError) as e:
-                logger.error(
-                    "Failed to initialize separator model",
-                    error=str(e),
-                    model="UVR-MDX-NET-Voc_FT.onnx",
-                )
                 self._separator = None
                 raise RuntimeError(f"Cannot initialize audio separator: {str(e)}") from e
-
-    def get_separator_with_output_dir(self, output_dir: str) -> Separator:
-        try:
-            logger.info(
-                "Creating separator with custom output_dir",
-                output_dir=output_dir,
-                model="UVR-MDX-NET-Voc_FT.onnx",
-            )
-            separator = Separator(
-                output_dir=output_dir,
-                output_format="mp3",
-                normalization_threshold=0.9,
-                amplification_threshold=0.9,
-                mdx_params={
-                    "hop_length": 512,
-                    "segment_size": 128,
-                    "overlap": 0.25,
-                    "batch_size": 1,
-                    "enable_denoise": False,
-                },
-            )
-            separator.load_model(model_filename="UVR-MDX-NET-Voc_FT.onnx")
-            logger.info(
-                "Separator with custom output_dir initialized successfully",
-                output_dir=output_dir,
-                model="UVR-MDX-NET-Voc_FT.onnx",
-            )
-            return separator
-        except (ImportError, RuntimeError, OSError) as e:
-            logger.error(
-                "Failed to initialize separator with custom output_dir",
-                error=str(e),
-                output_dir=output_dir,
-                model="UVR-MDX-NET-Voc_FT.onnx",
-            )
-            raise RuntimeError(f"Cannot initialize audio separator: {str(e)}") from e
 
     @property
     def separator_lock(self) -> threading.Lock:
@@ -130,22 +125,106 @@ def run_with_timeout(fn, *args, timeout: int = 300):
             raise TimeoutError(f"Operation timed out after {timeout} seconds") from exc
 
 
+def retry_with_backoff(func, max_retries=3, base_delay=1, backoff_factor=2, max_delay=60):
+    """Retry function with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except (OSError, RuntimeError) as e:
+            if attempt == max_retries - 1:
+                raise e
+
+            delay = min(base_delay * (backoff_factor**attempt), max_delay)
+            logger.warning(
+                "Attempt failed, retrying",
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                delay=delay,
+                error=str(e),
+            )
+            time.sleep(delay)
+
+
 class AudioProcessor:
+
     def __init__(
         self,
         r2_client,
         webhook_manager,
-        progress_tracker: Optional[JobProgressTracker] = None,
-        separator_provider: Optional[SeparatorProvider] = None,
-        download_timeout: int = 300,
-        processing_timeout: int = 300,
+        task_manager: JobProgressTracker,
     ):
         self.r2_client = r2_client
         self.webhook_manager = webhook_manager
-        self.progress_tracker = progress_tracker
-        self.separator_provider = separator_provider or DefaultSeparatorProvider()
-        self.download_timeout = download_timeout
-        self.processing_timeout = processing_timeout
+        self.working_dir = Path("audio_workspace")
+        self.separator_provider = DefaultSeparatorProvider()
+        self.progress_tracker = task_manager
+        self._ensure_working_dir()
+
+    def _ensure_working_dir(self) -> None:
+        """Ensure the working directory exists."""
+        self.working_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Working directory initialized", path=str(self.working_dir))
+
+    def cleanup_working_dir(self) -> None:
+        """Clean up the entire working directory."""
+        if self.working_dir.exists():
+            shutil.rmtree(self.working_dir, ignore_errors=True)
+            logger.info("Working directory cleaned up", path=str(self.working_dir))
+            self._ensure_working_dir()
+
+    def initialize_model(self) -> None:
+        """Initialize the separator model on startup to download it before first request."""
+        self.separator_provider.initialize_model()
+
+    def _update_progress(self, track_id: str, status: JobStatus, progress: int = 0) -> None:
+        """Update job progress if tracker is available."""
+        if self.progress_tracker:
+            self.progress_tracker.update_job(track_id, status, progress=progress)
+
+    def _validate_file_size(self, size_bytes: int, max_file_size_mb: int = 100) -> None:
+        """Validate file size against maximum allowed size."""
+        size_mb = int(size_bytes) / (1024 * 1024)
+        if size_mb > max_file_size_mb:
+            raise ValueError(f"File too large: {size_mb:.1f}MB (limit: {max_file_size_mb}MB)")
+
+    def _validate_file_size_approx(self, size_bytes: int, max_file_size_mb: int = 100) -> None:
+        """Validate approximate file size against maximum allowed size."""
+        size_mb = int(size_bytes) / (1024 * 1024)
+        if size_mb > max_file_size_mb:
+            raise ValueError(
+                f"File too large (approx): {size_mb:.1f}MB (limit: {max_file_size_mb}MB)"
+            )
+
+    def _validate_audio_file(self, audio_file: Path) -> None:
+        """Validate audio file before processing."""
+        if not audio_file.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_file}")
+
+        if audio_file.stat().st_size == 0:
+            raise ValueError(f"Audio file is empty: {audio_file}")
+
+        # Check file extension
+        allowed_extensions = {".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg"}
+        if audio_file.suffix.lower() not in allowed_extensions:
+            raise ValueError(f"Unsupported audio format: {audio_file.suffix}")
+
+    def _validate_separated_files(self, output_dir: Path, track_id: str = "") -> Tuple[Path, Path]:
+        vocals_file, instrumental_file = FileManager.detect_separated_files(output_dir)
+
+        if not vocals_file or not instrumental_file:
+            available_files = [f.name for f in output_dir.iterdir() if f.is_file()]
+            if track_id:
+                logger.error(
+                    "Could not find separated tracks after separation",
+                    track_id=track_id,
+                    available_files=available_files,
+                    output_dir=str(output_dir),
+                )
+            raise FileNotFoundError(
+                f"Could not find separated tracks. Found files: {available_files}"
+            )
+
+        return vocals_file, instrumental_file
 
     def process_audio(
         self,
@@ -154,35 +233,34 @@ class AudioProcessor:
         max_file_size_mb: int,
         processing_timeout: Optional[int] = None,
     ) -> None:
-        temp_dir: Optional[Path] = None
-        timeout_value = processing_timeout or self.processing_timeout
+        job_dir: Optional[Path] = None
+        timeout_value = processing_timeout
 
         try:
-            temp_dir = Path(tempfile.mkdtemp())
+            job_dir = self.working_dir / track_id
+            job_dir.mkdir(parents=True, exist_ok=True)
 
-            if self.progress_tracker:
-                self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=10)
+            self._update_progress(track_id, JobStatus.PROCESSING, 10)
 
             logger.info(
                 "Downloading audio",
                 track_id=track_id,
                 query=search_query,
-                max_size_mb=max_file_size_mb,
             )
             downloaded_file, original_title = self.download_audio(
-                temp_dir, search_query, max_file_size_mb
+                job_dir, search_query, max_file_size_mb
             )
 
-            if self.progress_tracker:
-                self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=40)
+            self._update_progress(track_id, JobStatus.PROCESSING, 40)
 
             logger.info("Separating audio", track_id=track_id, timeout=timeout_value)
             vocals_file, instrumental_file = self.separate_audio_tracks(
-                temp_dir, downloaded_file, track_id, timeout_value
+                job_dir,
+                downloaded_file,
+                track_id,
             )
 
-            if self.progress_tracker:
-                self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=80)
+            self._update_progress(track_id, JobStatus.PROCESSING, 80)
 
             logger.info("Uploading separated tracks to R2", track_id=track_id)
             FileManager.upload_to_r2(track_id, vocals_file, instrumental_file, self.r2_client)
@@ -209,12 +287,12 @@ class AudioProcessor:
             FileManager.cleanup_track_files(track_id, self.r2_client)
 
         finally:
-            if temp_dir and temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            if job_dir and job_dir.exists():
+                shutil.rmtree(job_dir, ignore_errors=True)
+                logger.info("Cleaned up job directory", track_id=track_id, path=str(job_dir))
 
     def create_result_dict(self, track_id: str, original_title: Optional[str]) -> Dict[str, str]:
         result = {
-            "message": "Audio separation completed successfully",
             "original_title": original_title or "Unknown Title",
             "track_id": track_id,
         }
@@ -236,85 +314,61 @@ class AudioProcessor:
         result["storage"] = "r2"
         return result
 
+    def _get_base_ydl_opts(self) -> dict:
+        return {
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+    def _validate_search_results(self, search_results: dict) -> dict:
+        if not search_results or "entries" not in search_results or not search_results["entries"]:
+            raise RuntimeError("No search results found")
+        return search_results["entries"][0]
+
+    def _validate_entry_file_size(self, entry: dict, max_file_size_mb: int) -> None:
+        if "filesize" in entry and entry["filesize"]:
+            self._validate_file_size(entry["filesize"], max_file_size_mb)
+        elif "filesize_approx" in entry and entry["filesize_approx"]:
+            self._validate_file_size_approx(entry["filesize_approx"], max_file_size_mb)
+
+    def _extract_title_from_entry(self, entry: dict) -> str:
+        title_value = entry.get("title") if isinstance(entry, dict) else None
+        return str(title_value) if isinstance(title_value, str) else "Unknown Title"
+
     def download_audio(
-        self, temp_dir: Path, search_query: str, max_file_size_mb: int
+        self, job_dir: Path, search_query: str, max_file_size_mb: int
     ) -> Tuple[Path, Optional[str]]:
         def _download():
-            extract_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "format": "bestaudio/best",
-            }
+            search_term = f"ytsearch1:{search_query}"
+            extract_opts = {**self._get_base_ydl_opts(), "format": "bestaudio/best"}
             with yt_dlp.YoutubeDL(extract_opts) as ydl:
-                search_results = ydl.extract_info(f"ytsearch1:{search_query}", download=False)
-
-                if (
-                    not search_results
-                    or "entries" not in search_results
-                    or not search_results["entries"]
-                ):
+                search_results = ydl.extract_info(search_term, download=False)
+                if search_results is None:
                     raise RuntimeError("No search results found")
+                first_entry = self._validate_search_results(search_results)
+                self._validate_entry_file_size(first_entry, max_file_size_mb)
 
-                first_entry = search_results["entries"][0]
-
-                if "filesize" in first_entry and first_entry["filesize"]:
-                    file_size_mb = first_entry["filesize"] / (1024 * 1024)
-                    if file_size_mb > max_file_size_mb:
-                        raise ValueError(
-                            f"File too large: {file_size_mb:.1f}MB "
-                            f"(limit: {max_file_size_mb}MB)"
-                        )
-
-                if "filesize_approx" in first_entry and first_entry["filesize_approx"]:
-                    file_size_mb = first_entry["filesize_approx"] / (1024 * 1024)
-                    if file_size_mb > max_file_size_mb:
-                        raise ValueError(
-                            f"File too large (approx): {file_size_mb:.1f}MB "
-                            f"(limit: {max_file_size_mb}MB)"
-                        )
-
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "extractaudio": True,
-                "audioformat": "mp3",
-                "outtmpl": str(temp_dir / "original.%(ext)s"),
-                "quiet": True,
-                "no_warnings": True,
-                "extract_flat": False,
+            download_opts = {
+                **self._get_base_ydl_opts(),
+                "format": "bestaudio[ext=m4a]/bestaudio",
+                "outtmpl": str(job_dir / "original.%(ext)s"),
             }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                search_results = ydl.extract_info(f"ytsearch1:{search_query}", download=True)
-
-                if (
-                    not search_results
-                    or "entries" not in search_results
-                    or not search_results["entries"]
-                ):
+            with yt_dlp.YoutubeDL(download_opts) as ydl:
+                search_results = ydl.extract_info(search_term, download=True)
+                if search_results is None:
                     raise RuntimeError("No search results found")
+                first_entry = self._validate_search_results(search_results)
 
-                for file_path in temp_dir.iterdir():
-                    if not file_path.name.startswith("original."):
-                        continue
-
-                    file_size_mb = file_path.stat().st_size / (1024 * 1024)
-                    if file_size_mb > max_file_size_mb:
-                        raise ValueError(f"File too large: {file_size_mb:.1f}MB")
-
-                    first_entry = search_results["entries"][0]
-                    title_value = (
-                        first_entry.get("title") if isinstance(first_entry, dict) else None
-                    )
-                    original_title = (
-                        str(title_value) if isinstance(title_value, str) else "Unknown Title"
-                    )
-
-                    return file_path, original_title
+                for file_path in job_dir.iterdir():
+                    if file_path.name.startswith("original."):
+                        self._validate_file_size(file_path.stat().st_size, max_file_size_mb)
+                        original_title = self._extract_title_from_entry(first_entry)
+                        return file_path, original_title
 
                 raise RuntimeError("Downloaded file not found")
 
         try:
-            return run_with_timeout(_download, timeout=self.download_timeout)
+            return run_with_timeout(_download, timeout=300)
         except (DownloadError, ExtractorError) as e:
             raise RuntimeError(f"YouTube download failed: {str(e)}") from e
         except (OSError, IOError) as e:
@@ -324,77 +378,87 @@ class AudioProcessor:
 
     def separate_audio_tracks(
         self,
-        temp_dir: Path,
+        job_dir: Path,
         audio_file: Path,
         track_id: str,
         processing_timeout: int = 300,
     ) -> Tuple[Path, Path]:
-        output_dir = temp_dir / "separated"
+        output_dir = job_dir / "separated"
         output_dir.mkdir(exist_ok=True, parents=True)
 
         try:
-            if self.progress_tracker:
-                self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=50)
+            self._validate_audio_file(audio_file)
+            self._update_progress(track_id, JobStatus.PROCESSING, 50)
 
             with self.separator_provider.separator_lock:
-                separator = self.separator_provider.get_separator_with_output_dir(str(output_dir))
-
-                run_with_timeout(
-                    separator.separate,
-                    str(audio_file),
-                    timeout=processing_timeout,
+                temp_separator = Separator(
+                    output_dir=str(output_dir),
+                    output_format="WAV",
+                    normalization_threshold=0.9,
+                    amplification_threshold=0.9,
+                    mdx_params=mdx_params,
                 )
 
-            if track_id and self.progress_tracker:
-                self.progress_tracker.update_job(track_id, JobStatus.PROCESSING, progress=70)
+                temp_separator.load_model(model_filename=MODEL_FILENAME)
 
-        except (RuntimeError, OSError, TimeoutError) as e:
+                logger.debug(
+                    "Separator configuration",
+                    track_id=track_id,
+                    output_dir=output_dir,
+                    model=MODEL_FILENAME,
+                )
+
+                try:
+                    output_files = run_with_timeout(
+                        temp_separator.separate,
+                        str(audio_file),
+                        timeout=processing_timeout,
+                    )
+                    logger.info(
+                        "Separation completed", track_id=track_id, output_files=output_files
+                    )
+                except Exception as sep_error:
+                    logger.error(
+                        "Separation process failed",
+                        track_id=track_id,
+                        error=str(sep_error),
+                        error_type=type(sep_error).__name__,
+                    )
+                    raise
+
+            self._update_progress(track_id, JobStatus.PROCESSING, 70)
+
+        except (RuntimeError, OSError, TimeoutError, ValueError, FileNotFoundError) as e:
+            logger.error(
+                "Failed to process file",
+                track_id=track_id,
+                audio_file_path=str(audio_file),
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             raise RuntimeError(f"Audio separation failed: {str(e)}") from e
 
-        vocals_file, instrumental_file = FileManager.detect_separated_files(output_dir)
-
-        if not vocals_file or not instrumental_file:
-            available_files = [f.name for f in output_dir.iterdir() if f.is_file()]
-            logger.error(
-                "Could not find separated tracks after separation",
-                track_id=track_id,
-                available_files=available_files,
-                output_dir=str(output_dir),
-            )
-            raise FileNotFoundError(
-                f"Could not find separated tracks. Found files: {available_files}"
-            )
-
-        return vocals_file, instrumental_file
-
-    def download_audio_simple(self, search_query: str, max_file_size_mb: int) -> Path:
-        temp_dir = Path(tempfile.mkdtemp())
-        try:
-            downloaded_file, _ = self.download_audio(temp_dir, search_query, max_file_size_mb)
-            return downloaded_file
-        except Exception:
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
+        return self._validate_separated_files(output_dir, track_id)
 
     def separate_audio(self, audio_file: Path) -> Tuple[Path, Path]:
-        temp_dir = audio_file.parent / "separated"
-        temp_dir.mkdir(exist_ok=True, parents=True)
+        output_dir = audio_file.parent / "separated"
+        output_dir.mkdir(exist_ok=True, parents=True)
 
         try:
-            with self.separator_provider.separator_lock:
-                separator = self.separator_provider.get_separator_with_output_dir(str(temp_dir))
-                separator.separate(str(audio_file))
+            self._validate_audio_file(audio_file)
 
-            vocals_file, instrumental_file = FileManager.detect_separated_files(temp_dir)
+            separator = Separator(
+                output_dir=str(output_dir),
+                output_format="WAV",
+                normalization_threshold=0.9,
+                amplification_threshold=0.9,
+                mdx_params=mdx_params,
+            )
 
-            if not vocals_file or not instrumental_file:
-                available_files = [f.name for f in temp_dir.iterdir() if f.is_file()]
-                raise FileNotFoundError(
-                    f"Could not find separated tracks. Found files: {available_files}"
-                )
+            separator.load_model(model_filename=MODEL_FILENAME)
+            separator.separate(str(audio_file))
 
-            return vocals_file, instrumental_file
+            return self._validate_separated_files(output_dir)
 
         except Exception as e:
             raise RuntimeError(f"Audio separation failed: {str(e)}") from e
