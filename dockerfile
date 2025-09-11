@@ -24,14 +24,16 @@ WORKDIR /app
 RUN pip install uv
 
 # Copy dependency files
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
 # Install dependencies
-RUN uv pip install --system -r pyproject.toml
+RUN uv sync --frozen --no-dev
 
 # Copy application source code
-COPY src/ ./src/
-COPY main.py ./
+COPY . .
+
+# Create audio workspace directory
+RUN mkdir -p audio_workspace
 
 # Change ownership to non-root user
 RUN chown -R appuser:appuser /app
@@ -46,5 +48,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application
-CMD ["python", "main.py"]
+# Run the application with uvicorn
+CMD ["uv", "run", "uvicorn", "__init__:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
