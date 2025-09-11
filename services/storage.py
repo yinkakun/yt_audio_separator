@@ -32,8 +32,8 @@ class CloudflareR2:
         config: R2Storage,
     ):
         self.s3_url = config.s3_url
-        self.access_key = config.access_key_id
-        self.secret_key = config.secret_access_key
+        self.access_key_id = config.access_key_id
+        self.secret_access_key = config.secret_access_key
         self.bucket_name = config.bucket_name
         self.public_domain = config.public_domain
         self.client: Optional[Any] = None
@@ -47,8 +47,8 @@ class CloudflareR2:
         self.client = boto3.client(
             "s3",
             endpoint_url=self.s3_url,
-            aws_access_key_id=self.access_key,
-            aws_secret_access_key=self.secret_key,
+            aws_access_key_id=self.access_key_id,
+            aws_secret_access_key=self.secret_access_key,
             region_name="auto",
         )
 
@@ -146,8 +146,8 @@ class CloudflareR2:
             async with self._session.client(  # type: ignore[attr-defined]
                 "s3",
                 endpoint_url=self.s3_url,
-                aws_access_key_id=self.access_key,
-                aws_secret_access_key=self.secret_key,
+                aws_access_key_id=self.access_key_id,
+                aws_secret_access_key=self.secret_access_key,
                 region_name="auto",
                 config=self._config,
             ) as client:
@@ -185,8 +185,8 @@ class CloudflareR2:
             async with self._session.client(  # type: ignore[attr-defined]
                 "s3",
                 endpoint_url=self.s3_url,
-                aws_access_key_id=self.access_key,
-                aws_secret_access_key=self.secret_key,
+                aws_access_key_id=self.access_key_id,
+                aws_secret_access_key=self.secret_access_key,
                 region_name="auto",
                 config=self._config,
             ) as client:
