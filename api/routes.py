@@ -1,16 +1,17 @@
-import asyncio
 import time
 import uuid as uuid_module
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+
+import requests
 
 from config.logging_config import get_logger
 from models.job import JobStatus
@@ -42,8 +43,93 @@ def validate_track_id(track_id: str) -> bool:
 logger = get_logger(__name__)
 
 
+def send_webhook_notification(callback_url: str, payload: Dict[str, Any]) -> None:
+    """Send webhook notification"""
+    if not callback_url:
+        return
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                callback_url, json=payload, timeout=30, headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            logger.info(
+                "Webhook notification sent successfully",
+                callback_url=callback_url,
+                track_id=payload.get("track_id"),
+            )
+            return
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries - 1:
+                logger.error(
+                    "Failed to send webhook after all retries",
+                    callback_url=callback_url,
+                    track_id=payload.get("track_id"),
+                    error=str(e),
+                )
+            else:
+                logger.warning(
+                    "Webhook attempt failed, retrying",
+                    attempt=attempt + 1,
+                    callback_url=callback_url,
+                    error=str(e),
+                )
+                time.sleep(2**attempt)  # Exponential backoff
+
+
+def process_audio_background(
+    track_id: str,
+    search_query: str,
+    max_file_size_mb: int,
+    processing_timeout: Optional[int],
+    callback_url: Optional[str],
+    audio_processor,
+) -> None:
+    """Background task to process audio separation."""
+    try:
+        logger.info("Starting audio processing task", track_id=track_id, search_query=search_query)
+
+        result = audio_processor.process_audio(
+            track_id=track_id,
+            search_query=search_query,
+            max_file_size_mb=max_file_size_mb,
+            processing_timeout=processing_timeout,
+        )
+
+        logger.info("Audio processing completed successfully", track_id=track_id)
+
+        success_payload = {
+            "status": "completed",
+            "track_id": track_id,
+            "result": result,
+            "progress": 100,
+            "created_at": time.time(),
+        }
+
+        if callback_url:
+            send_webhook_notification(callback_url, success_payload)
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error("Audio processing failed", track_id=track_id, error=error_msg, exc_info=True)
+
+        failure_payload = {
+            "status": "failed",
+            "track_id": track_id,
+            "error": error_msg,
+            "progress": 0,
+            "created_at": time.time(),
+        }
+
+        if callback_url:
+            send_webhook_notification(callback_url, failure_payload)
+
+
 class SeparationRequest(BaseModel):
     search_query: str = Field(..., min_length=1, max_length=500)
+    callback_url: Optional[str] = Field(None, max_length=2000)
 
     @field_validator("search_query")
     @classmethod
@@ -52,16 +138,14 @@ class SeparationRequest(BaseModel):
             raise ValueError("search_query must be a string")
         return v.strip()
 
-
-class JobStatusResponse(BaseModel):
-    track_id: str
-    status: str
-    progress: int
-    created_at: float
-    completed_at: Optional[float] = None
-    processing_time: Optional[float] = None
-    error: Optional[str] = None
-    result: Optional[Dict[str, Any]] = None
+    @field_validator("callback_url")
+    @classmethod
+    def validate_callback_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("callback_url must be a valid HTTP/HTTPS URL")
+        return v.strip()
 
 
 class HealthResponse(BaseModel):
@@ -71,14 +155,14 @@ class HealthResponse(BaseModel):
     services: Dict[str, bool]
 
 
-def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook_manager):
+def create_fastapi_app(config, audio_processor, storage):
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         audio_processor.initialize_model()
         # Startup
         yield
         # Shutdown
-        await r2_client.close()
+        await storage.close()
 
     app = FastAPI(
         title="YouTube Audio Separator API",
@@ -147,21 +231,11 @@ def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook
                 content={"error": "Internal server error"},
             )
 
-    @app.get("/")
-    async def read_root():
-        return {
-            "status": "ok",
-        }
-
     @app.post("/separate-audio", status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(config.rate_limits.requests)
-    async def separate_audio(request: Request, separation_request: SeparationRequest):
-        if task_manager.count_active_jobs() >= config.processing.max_active_jobs:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Server busy. Please try again later.",
-            )
-
+    async def separate_audio(
+        request: Request, separation_request: SeparationRequest, background_tasks: BackgroundTasks
+    ):  # pylint: disable=unused-argument
         try:
             search_query = sanitize_input(
                 separation_request.search_query, config.input_limits.max_search_query_length
@@ -172,17 +246,20 @@ def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook
             ) from e
 
         track_id = str(uuid_module.uuid4())
-        task_manager.update_job(track_id, JobStatus.PROCESSING, progress=0)
 
-        asyncio.create_task(
-            process_audio_background_async(
-                track_id,
-                search_query,
-                config,
-                task_manager,
-                audio_processor,
-                webhook_manager,
-            )
+        # Queue the background task
+        background_tasks.add_task(
+            process_audio_background,
+            track_id,
+            search_query,
+            config.input_limits.max_file_size_mb,
+            (
+                config.processing.processing_timeout
+                if hasattr(config.processing, "processing_timeout")
+                else None
+            ),
+            separation_request.callback_url,
+            audio_processor,  # Pass audio_processor from closure
         )
 
         logger.info(
@@ -197,89 +274,29 @@ def create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook
             "message": "Audio separation started",
         }
 
-    @app.get("/status/{track_id}", response_model=JobStatusResponse)
-    async def get_job_status(track_id: str):
-        if not validate_track_id(track_id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid track ID format"
-            )
-
-        job = task_manager.get_job(track_id)
-        if not job:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-
-        response_data = {
-            "track_id": track_id,
-            "status": job.status.value,
-            "progress": job.progress,
-            "created_at": job.created_at,
-        }
-
-        if job.completed_at:
-            response_data["completed_at"] = job.completed_at
-            response_data["processing_time"] = job.completed_at - job.created_at
-
-        if job.error:
-            response_data["error"] = job.error
-        if job.result:
-            response_data["result"] = job.result
-
-        return JobStatusResponse(**response_data)
-
     @app.get("/health", response_model=HealthResponse)
     async def health_check():
         health_status = {
             "status": "healthy",
             "timestamp": time.time(),
             "metrics": {
-                "active_jobs": task_manager.count_active_jobs(),
-                "max_active_jobs": config.processing.max_active_jobs,
+                "active_jobs": 0,  # Background tasks don't have easy counting
+                "max_active_jobs": 0,  # No longer relevant with background tasks
             },
             "services": {
-                "r2_operational": False,
-                "r2_configured": r2_client.client is not None,
+                "storage_operational": False,
+                "storage_configured": storage.client is not None,
             },
         }
 
-        if r2_client.client:
+        if storage.client:
             try:
-                await r2_client.file_exists_async("_health_check")
-                health_status["services"]["r2_operational"] = True
+                await storage.file_exists_async("_health_check")
+                health_status["services"]["storage_operational"] = True
             except (ConnectionError, TimeoutError, OSError) as e:
-                health_status["services"]["r2_operational"] = False
-                logger.error("R2 health check failed: %s", e)
+                health_status["services"]["storage_operational"] = False
+                logger.error("Storage health check failed: %s", e)
 
         return HealthResponse(**health_status)
 
     return app
-
-
-async def process_audio_background_async(
-    track_id: str,
-    search_query: str,
-    config,
-    task_manager,
-    audio_processor,
-    webhook_manager,
-) -> None:
-    try:
-        loop = asyncio.get_event_loop()
-
-        await loop.run_in_executor(
-            None,
-            audio_processor.process_audio,
-            track_id,
-            search_query,
-            config.input_limits.max_file_size_mb,
-            (
-                config.processing.processing_timeout
-                if hasattr(config.processing, "processing_timeout")
-                else None
-            ),
-        )
-
-    except Exception as e:
-        error_msg = str(e)
-        logger.error("Job %s failed: %s", track_id, error_msg)
-        task_manager.update_job(track_id, JobStatus.FAILED, error=error_msg)
-        await webhook_manager.notify_job_failed_async(track_id, error_msg)

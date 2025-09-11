@@ -12,8 +12,6 @@ from audio_separator.separator import Separator
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from config.logging_config import get_logger
-from models.job import JobStatus
-from services.file_manager import FileManager
 
 logger = get_logger(__name__)
 
@@ -26,18 +24,6 @@ mdx_params = {
     "batch_size": 1,
     "enable_denoise": False,
 }
-
-
-class JobProgressTracker(Protocol):
-    def update_job(
-        self,
-        track_id: str,
-        status: JobStatus,
-        *,
-        progress: int = 0,
-        error: Optional[str] = None,
-        result: Optional[Dict] = None,
-    ) -> None: ...
 
 
 class SeparatorProvider(Protocol):
@@ -149,15 +135,11 @@ class AudioProcessor:
 
     def __init__(
         self,
-        r2_client,
-        webhook_manager,
-        task_manager: JobProgressTracker,
+        storage,
     ):
-        self.r2_client = r2_client
-        self.webhook_manager = webhook_manager
+        self.storage = storage
         self.working_dir = Path("audio_workspace")
         self.separator_provider = DefaultSeparatorProvider()
-        self.progress_tracker = task_manager
         self._ensure_working_dir()
 
     def _ensure_working_dir(self) -> None:
@@ -175,11 +157,6 @@ class AudioProcessor:
     def initialize_model(self) -> None:
         """Initialize the separator model on startup to download it before first request."""
         self.separator_provider.initialize_model()
-
-    def _update_progress(self, track_id: str, status: JobStatus, progress: int = 0) -> None:
-        """Update job progress if tracker is available."""
-        if self.progress_tracker:
-            self.progress_tracker.update_job(track_id, status, progress=progress)
 
     def _validate_file_size(self, size_bytes: int, max_file_size_mb: int = 100) -> None:
         """Validate file size against maximum allowed size."""
@@ -209,7 +186,7 @@ class AudioProcessor:
             raise ValueError(f"Unsupported audio format: {audio_file.suffix}")
 
     def _validate_separated_files(self, output_dir: Path, track_id: str = "") -> Tuple[Path, Path]:
-        vocals_file, instrumental_file = FileManager.detect_separated_files(output_dir)
+        vocals_file, instrumental_file = self.storage.detect_separated_files(output_dir)
 
         if not vocals_file or not instrumental_file:
             available_files = [f.name for f in output_dir.iterdir() if f.is_file()]
@@ -232,15 +209,13 @@ class AudioProcessor:
         search_query: str,
         max_file_size_mb: int,
         processing_timeout: Optional[int] = None,
-    ) -> None:
+    ) -> Dict[str, str]:
         job_dir: Optional[Path] = None
         timeout_value = processing_timeout
 
         try:
             job_dir = self.working_dir / track_id
             job_dir.mkdir(parents=True, exist_ok=True)
-
-            self._update_progress(track_id, JobStatus.PROCESSING, 10)
 
             logger.info(
                 "Downloading audio",
@@ -251,8 +226,6 @@ class AudioProcessor:
                 job_dir, search_query, max_file_size_mb
             )
 
-            self._update_progress(track_id, JobStatus.PROCESSING, 40)
-
             logger.info("Separating audio", track_id=track_id, timeout=timeout_value)
             vocals_file, instrumental_file = self.separate_audio_tracks(
                 job_dir,
@@ -260,31 +233,23 @@ class AudioProcessor:
                 track_id,
             )
 
-            self._update_progress(track_id, JobStatus.PROCESSING, 80)
-
-            logger.info("Uploading separated tracks to R2", track_id=track_id)
-            FileManager.upload_to_r2(track_id, vocals_file, instrumental_file, self.r2_client)
+            logger.info("Uploading separated tracks to storage", track_id=track_id)
+            self.storage.upload_track_files(track_id, vocals_file, instrumental_file)
 
             result = self.create_result_dict(track_id, original_title)
-            if self.progress_tracker:
-                self.progress_tracker.update_job(
-                    track_id, JobStatus.COMPLETED, progress=100, result=result
-                )
-
-            self.webhook_manager.notify_job_completed(track_id, result)
+            logger.info(
+                "Job completed successfully", track_id=track_id, result_keys=list(result.keys())
+            )
+            return result
 
         except (RuntimeError, OSError, FileNotFoundError, ValueError, TimeoutError) as e:
             error_msg = str(e)
             logger.error(
                 "Audio processing failed", track_id=track_id, error=error_msg, query=search_query
             )
-            if self.progress_tracker:
-                self.progress_tracker.update_job(
-                    track_id, JobStatus.FAILED, progress=0, error=error_msg
-                )
-
-            self.webhook_manager.notify_job_failed(track_id, error_msg)
-            FileManager.cleanup_track_files(track_id, self.r2_client)
+            logger.error("Job failed", track_id=track_id, error=error_msg)
+            self.storage.cleanup_track_files(track_id)
+            raise
 
         finally:
             if job_dir and job_dir.exists():
@@ -297,11 +262,11 @@ class AudioProcessor:
             "track_id": track_id,
         }
 
-        vocals_url = self.r2_client.get_download_url(
-            f"{track_id}/vocals.mp3", self.r2_client.public_domain
+        vocals_url = self.storage.get_download_url(
+            f"{track_id}/vocals.mp3", self.storage.public_domain
         )
-        instrumental_url = self.r2_client.get_download_url(
-            f"{track_id}/instrumental.mp3", self.r2_client.public_domain
+        instrumental_url = self.storage.get_download_url(
+            f"{track_id}/instrumental.mp3", self.storage.public_domain
         )
 
         if not vocals_url or not instrumental_url:
@@ -388,8 +353,6 @@ class AudioProcessor:
 
         try:
             self._validate_audio_file(audio_file)
-            self._update_progress(track_id, JobStatus.PROCESSING, 50)
-
             with self.separator_provider.separator_lock:
                 temp_separator = Separator(
                     output_dir=str(output_dir),
@@ -426,8 +389,6 @@ class AudioProcessor:
                     )
                     raise
 
-            self._update_progress(track_id, JobStatus.PROCESSING, 70)
-
         except (RuntimeError, OSError, TimeoutError, ValueError, FileNotFoundError) as e:
             logger.error(
                 "Failed to process file",
@@ -458,7 +419,7 @@ class AudioProcessor:
             separator.load_model(model_filename=MODEL_FILENAME)
             separator.separate(str(audio_file))
 
-            return self._validate_separated_files(output_dir)
+            return self.storage.detect_separated_files(output_dir)
 
         except Exception as e:
             raise RuntimeError(f"Audio separation failed: {str(e)}") from e

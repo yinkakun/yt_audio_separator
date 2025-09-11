@@ -5,8 +5,7 @@ from config.config import Config
 from config.logging_config import get_logger, setup_logging
 from services.audio_processor import AudioProcessor
 from services.storage import CloudflareR2, R2Storage
-from services.task_manager import TaskManager
-from services.webhook import WebhookManager
+
 
 logger = get_logger(__name__)
 
@@ -34,9 +33,6 @@ def validate_environment(config):
                 f"Missing required R2 environment variables: {', '.join(missing_r2_configs)}"
             )
 
-    if not config.webhook_url:
-        warnings.append("WEBHOOK_URL not set - webhooks will not work")
-
     for w in warnings:
         logger.warning(w)
 
@@ -55,7 +51,7 @@ def create_app() -> FastAPI:
 
     setup_logging(config.server.debug)
 
-    r2_client = CloudflareR2(
+    storage = CloudflareR2(
         config=R2Storage(
             s3_url=f"https://{config.cloudflare_account_id}.r2.cloudflarestorage.com",
             bucket_name=config.r2_storage.bucket_name,
@@ -65,14 +61,8 @@ def create_app() -> FastAPI:
         )
     )
 
-    task_manager = TaskManager(max_workers=config.processing.max_active_jobs)
-    webhook_manager = WebhookManager(config.webhooks.url, config.webhooks.secret)
-    audio_processor = AudioProcessor(
-        r2_client,
-        webhook_manager,
-        task_manager,
-    )
+    audio_processor = AudioProcessor(storage)
 
-    app = create_fastapi_app(config, task_manager, audio_processor, r2_client, webhook_manager)
+    app = create_fastapi_app(config, audio_processor, storage)
 
     return app

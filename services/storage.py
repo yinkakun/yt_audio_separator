@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import aioboto3
 import aiohttp
@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from pydantic import BaseModel
 
 from config.logging_config import get_logger
+from models.job import TrackType
 
 logger = get_logger(__name__)
 
@@ -192,4 +193,80 @@ class CloudflareR2:
                 await client.head_object(Bucket=self.bucket_name, Key=key)
                 return True
         except ClientError:
+            return False
+
+    TRACK_PATTERNS = {
+        TrackType.VOCALS: ["vocals", "(Vocals)"],
+        TrackType.INSTRUMENTAL: ["instrumental", "(Instrumental)", "no_vocals"],
+    }
+
+    def cleanup_track_files(self, track_id: str):
+        """Clean up track files from R2 storage."""
+        try:
+            for track_type in TrackType:
+                r2_key = f"{track_id}/{track_type.value}.mp3"
+                try:
+                    if self.delete_file(r2_key):
+                        logger.debug("Cleaned up R2 file: %s", r2_key)
+                except (ClientError, NoCredentialsError, OSError) as e:
+                    logger.warning("Failed to clean up R2 file %s: %s", r2_key, e)
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.error("Unexpected error during cleanup for %s: %s", track_id, e)
+
+    @staticmethod
+    def detect_separated_files(output_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
+        """Detect vocals and instrumental files in the output directory."""
+        vocals_file = None
+        instrumental_file = None
+
+        all_files = list(output_dir.iterdir())
+
+        for file_path in all_files:
+            if not file_path.is_file():
+                continue
+
+            filename = file_path.name.lower()
+
+            for track_type, patterns in CloudflareR2.TRACK_PATTERNS.items():
+                matching_patterns = [pattern for pattern in patterns if pattern.lower() in filename]
+                if not matching_patterns:
+                    continue
+
+                if track_type == TrackType.VOCALS:
+                    vocals_file = file_path
+                else:
+                    instrumental_file = file_path
+                break
+
+        return vocals_file, instrumental_file
+
+    def upload_track_files(self, track_id: str, vocals_file: Path, instrumental_file: Path) -> bool:
+        """Upload vocals and instrumental files to R2."""
+        try:
+            vocals_key = f"{track_id}/vocals.mp3"
+            instrumental_key = f"{track_id}/instrumental.mp3"
+
+            vocals_uploaded = self.upload_file(vocals_file, vocals_key)
+            instrumental_uploaded = self.upload_file(instrumental_file, instrumental_key)
+
+            return vocals_uploaded and instrumental_uploaded
+        except (OSError, ClientError, NoCredentialsError) as e:
+            logger.error("Failed to upload track files to R2: %s", e)
+            return False
+
+    async def upload_track_files_async(
+        self, track_id: str, vocals_file: Path, instrumental_file: Path
+    ) -> bool:
+        """Upload vocals and instrumental files to R2 asynchronously."""
+        try:
+            vocals_key = f"{track_id}/vocals.mp3"
+            instrumental_key = f"{track_id}/instrumental.mp3"
+
+            file_uploads = [(vocals_file, vocals_key), (instrumental_file, instrumental_key)]
+
+            upload_results = await self.upload_files_parallel(file_uploads)
+            return all(upload_results)
+
+        except (OSError, ClientError, NoCredentialsError) as e:
+            logger.error("Failed to upload track files to R2 (async): %s", e)
             return False

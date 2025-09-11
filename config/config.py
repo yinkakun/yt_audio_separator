@@ -25,14 +25,6 @@ class ServerSettings(BaseModel):
     debug: bool
 
 
-class WebhookSettings(BaseModel):
-    url: str
-    secret: str
-    timeout: int
-    max_retries: int
-    retry_delay: int
-
-
 class R2Config(BaseModel):
     account_id: str
     access_key_id: str
@@ -65,12 +57,6 @@ class Config(BaseSettings):
     host: str = "0.0.0.0"
 
     secret_key: str = ""
-
-    webhook_url: str = ""
-    webhook_secret: str = ""
-    webhook_timeout: int = 30
-    webhook_max_retries: int = 3
-    webhook_retry_delay: int = 5
 
     cloudflare_account_id: str = ""
     r2_access_key_id: str = ""
@@ -110,17 +96,6 @@ class Config(BaseSettings):
 
     @computed_field
     @property
-    def webhooks(self) -> WebhookSettings:
-        return WebhookSettings(
-            url=self.webhook_url,
-            secret=self.webhook_secret,
-            timeout=self.webhook_timeout,
-            max_retries=self.webhook_max_retries,
-            retry_delay=self.webhook_retry_delay,
-        )
-
-    @computed_field
-    @property
     def r2_storage(self) -> R2Config:
         return R2Config(
             account_id=self.cloudflare_account_id,
@@ -146,6 +121,3 @@ class Config(BaseSettings):
 
         if not self.r2_storage_enabled:
             raise ValueError("R2 storage must be configured")
-
-        if self.webhook_url and self.webhook_secret and len(self.webhook_secret) < 32:
-            raise ValueError("WEBHOOK_SECRET should be at least 32 characters long")
