@@ -56,13 +56,20 @@ class Config(BaseSettings):
     debug: bool = False
     host: str = "0.0.0.0"
 
-    secret_key: str = ""
+    webhook_secret: str = ""
+    webhook_url: str = ""
+    api_secret_key: str = ""
 
+    # Cloudflare R2 for storage
     cloudflare_account_id: str = ""
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
     r2_bucket_name: str = "audio-separation"
     r2_public_domain: str = ""
+
+    # Cloudflare KV for rate limiting
+    cloudflare_api_token: str = ""
+    cloudflare_kv_namespace_id: str = ""
 
     @computed_field
     @property
@@ -115,9 +122,18 @@ class Config(BaseSettings):
             and self.r2_public_domain
         )
 
+    @computed_field
+    @property
+    def kv_rate_limiting_enabled(self) -> bool:
+        return bool(
+            self.cloudflare_account_id
+            and self.cloudflare_api_token
+            and self.cloudflare_kv_namespace_id
+        )
+
     def validate_for_production(self) -> None:
-        if not self.secret_key:
-            raise ValueError("SECRET_KEY must be configured")
+        if not self.api_secret_key:
+            raise ValueError("API_SECRET_KEY must be configured")
 
         if not self.r2_storage_enabled:
             raise ValueError("R2 storage must be configured")
