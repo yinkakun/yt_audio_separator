@@ -1,70 +1,70 @@
 # YouTube Audio Separator
 
-Downloads YouTube audio and separates it into vocals and instrumental tracks.
+FastAPI service that downloads YouTube audio and separates it into vocals and instrumental tracks using machine learning models.
 
-## Installation
+## Quick Start
 
-```bash
-uv sync
-```
+1. **Install dependencies:**
 
-## Usage
+   ```bash
+   uv sync
+   ```
 
-**1. Set environment variables:**
+2. **Set environment variables:**
 
-```bash
-export CLOUDFLARE_ACCOUNT_ID=your_account_id
-export R2_ACCESS_KEY_ID=your_access_key  
-export R2_SECRET_ACCESS_KEY=your_secret_key
-export R2_PUBLIC_DOMAIN=your_domain
-```
+   ```bash
+   export CLOUDFLARE_ACCOUNT_ID=your_account_id
+   export R2_ACCESS_KEY_ID=your_access_key  
+   export R2_SECRET_ACCESS_KEY=your_secret_key
+   export R2_PUBLIC_DOMAIN=your_domain
+   ```
 
-**2. Start server:**
+3. **Start the server:**
 
-```bash
-uv run python main.py
-```
+   ```bash
+   uv run python main.py
+   ```
 
-**3. Separate audio:**
+4. **Process audio:**
 
-```bash
-curl -X POST http://localhost:5500/separate-audio \
-  -H "Content-Type: application/json" \
-  -d '{"search_query": "Song Title Artist"}'
-```
+   ```bash
+   # Start separation job
+   curl -X POST http://localhost:5500/separate-audio \
+     -H "Content-Type: application/json" \
+     -d '{"search_query": "Song Title Artist"}'
+   
+   # Check job status
+   curl http://localhost:5500/status/<track_id>
+   ```
 
-**4. Check status:**
+## API Reference
 
-```bash
-curl http://localhost:5500/status/<track_id>
-```
-
-## API Routes
+| Endpoint | Method | Description |
+|----------|---------|-------------|
+| `/separate-audio` | POST | Start audio separation job |
+| `/status/{track_id}` | GET | Get job status and results |
+| `/health` | GET | Health check with system metrics |
+| `/` | GET | Basic health status |
 
 ### POST /separate-audio
 
-Start audio separation job.
+Initiates audio separation for a YouTube video.
 
 **Request:**
 
 ```json
-{
-  "search_query": "Song Title Artist"
-}
+{ "search_query": "Song Title Artist" }
 ```
 
 **Response (202):**
 
 ```json
-{
-  "track_id": "uuid",
-  "status": "processing",
-}
+{ "track_id": "uuid", "status": "processing" }
 ```
 
 ### GET /status/{track_id}
 
-Get job status and results.
+Returns job status and download URLs when complete.
 
 **Response:**
 
@@ -85,48 +85,16 @@ Get job status and results.
 }
 ```
 
-### GET /health
+## Webhooks (Optional)
 
-Health check endpoint.
+Configure `WEBHOOK_URL` to receive job completion notifications:
 
-**Response:**
+| Event | Description |
+|-------|-------------|
+| `job.completed` | Audio separation successful |
+| `job.failed` | Audio separation failed |
 
-```json
-{
-  "status": "healthy",
-  "timestamp": 1234567890.0,
-  "metrics": {
-    "active_jobs": 2,
-    "max_active_jobs": 5
-  },
-  "services": {
-    "r2_operational": true,
-    "r2_configured": true
-  }
-}
-```
-
-### GET /
-
-Root endpoint returning basic status.
-
-**Response:**
-
-```json
-{
-  "status": "healthy"
-}
-```
-
-## Webhook Events
-
-When `WEBHOOK_URL` is configured, the following events are sent:
-
-### job.completed
-
-Sent when audio separation completes successfully.
-
-**Payload:**
+**Example payload:**
 
 ```json
 {
@@ -137,64 +105,40 @@ Sent when audio separation completes successfully.
     "status": "completed",
     "result": {
       "vocals_url": "https://domain.com/vocals.mp3",
-      "instrumental_url": "https://domain.com/instrumental.mp3",
-      "track_id": "uuid"
+      "instrumental_url": "https://domain.com/instrumental.mp3"
     }
   }
 }
 ```
 
-### job.failed
-
-Sent when audio separation fails.
-
-**Payload:**
-
-```json
-{
-  "event": "job.failed",
-  "timestamp": 1234567890.0,
-  "data": {
-    "track_id": "uuid",
-    "status": "failed",
-    "error": "Error message"
-  }
-}
-```
-
-**Webhook Headers:**
-
-- `Content-Type: application/json`
-- `X-Webhook-Signature: sha256=<signature>` (HMAC-SHA256 of payload)
-- `User-Agent: AudioSeparator/1.0`
+**Headers:** `Content-Type: application/json`, `X-Webhook-Signature: sha256=<signature>`
 
 ## Configuration
 
-**Required:**
-
-- `CLOUDFLARE_ACCOUNT_ID` - Cloudflare account ID  
-- `R2_ACCESS_KEY_ID` - R2 access key
-- `R2_SECRET_ACCESS_KEY` - R2 secret key
-- `R2_PUBLIC_DOMAIN` - R2 bucket public domain
-
-**Optional:**
-
-- `PORT` - Server port (default: 5500)
-- `MAX_FILE_SIZE_MB` - Max file size (default: 50MB)
-- `WEBHOOK_URL` - Job notification webhook URL
-- `WEBHOOK_SECRET` - Secret for webhook signature verification
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CLOUDFLARE_ACCOUNT_ID` | Yes | - | Cloudflare account ID |
+| `R2_ACCESS_KEY_ID` | Yes | - | R2 access key |
+| `R2_SECRET_ACCESS_KEY` | Yes | - | R2 secret key |
+| `R2_PUBLIC_DOMAIN` | Yes | - | R2 bucket public domain |
+| `PORT` | No | 5500 | Server port |
+| `MAX_FILE_SIZE_MB` | No | 50 | Maximum file size |
+| `WEBHOOK_URL` | No | - | Job notification webhook URL |
+| `WEBHOOK_SECRET` | No | - | Webhook signature verification secret |
 
 ## Development
 
-**Format code:**
-
 ```bash
-uv run black .
-uv run isort .
+# Format and lint code
+uv run black . && uv run isort . && uv run pylint .
+
+# Run with development settings
+uv run python main.py
 ```
 
-**Lint:**
+## Docker
 
 ```bash
-uv run pylint .
+docker build -t yt-audio-separator .
+docker run -p 5500:5500 --env-file .env yt-audio-separator
 ```
