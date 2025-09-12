@@ -1,9 +1,8 @@
 import asyncio
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import aioboto3
-import aiohttp
 import boto3
 from aiobotocore.config import AioConfig
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -16,13 +15,13 @@ logger = get_logger(__name__)
 
 
 class R2Storage(BaseModel):
-    s3_url: str
+    account_id: str
     access_key_id: str
     secret_access_key: str
     bucket_name: str
     public_domain: str
+    region: str = "auto"
     max_pool_connections: int = 10
-    max_connections_per_host: int = 5
 
 
 class CloudflareR2:
@@ -31,71 +30,40 @@ class CloudflareR2:
         self,
         config: R2Storage,
     ):
-        self.s3_url = config.s3_url
+        self.endpoint_url = f"https://{config.account_id}.r2.cloudflarestorage.com"
         self.access_key_id = config.access_key_id
         self.secret_access_key = config.secret_access_key
         self.bucket_name = config.bucket_name
         self.public_domain = config.public_domain
-        self.client: Optional[Any] = None
-
-        # Connection pooling configuration
-        self._connector: Optional[aiohttp.TCPConnector] = None
-        self._session: Optional[aioboto3.Session] = None
-        self._config: Optional[AioConfig] = None
-        self._pool_config = config
+        self.region = config.region
 
         self.client = boto3.client(
             "s3",
-            endpoint_url=self.s3_url,
+            endpoint_url=self.endpoint_url,
             aws_access_key_id=self.access_key_id,
             aws_secret_access_key=self.secret_access_key,
-            region_name="auto",
+            region_name=self.region,
         )
 
-        self._init_sync_config(config)
+        self._session: Optional[aioboto3.Session] = None
+        self._config: Optional[AioConfig] = None
+        self._init_async_config(config)
 
-    def _init_sync_config(self, config: R2Storage) -> None:
+    def _init_async_config(self, config: R2Storage) -> None:
         try:
             self._config = AioConfig(
                 max_pool_connections=config.max_pool_connections,
                 retries={"max_attempts": 3, "mode": "adaptive"},
             )
             self._session = aioboto3.Session()
+            logger.info("Initialized R2 configuration")
         except (ValueError, OSError, RuntimeError) as e:
-            logger.error("Failed to initialize R2 connection pool config: %s", str(e))
-            self._config = None
+            logger.error("Failed to initialize R2 config: %s", str(e))
+            self._config = AioConfig(retries={"max_attempts": 3, "mode": "adaptive"})
             self._session = aioboto3.Session()
 
-    async def _ensure_async_connector(self) -> None:
-        if self._connector is None:
-            try:
-                self._connector = aiohttp.TCPConnector(
-                    limit=self._pool_config.max_pool_connections,
-                    limit_per_host=self._pool_config.max_connections_per_host,
-                    ttl_dns_cache=300,
-                    use_dns_cache=True,
-                    keepalive_timeout=30,
-                    enable_cleanup_closed=True,
-                )
-                logger.info("Created R2 async connector")
-            except (ValueError, OSError, RuntimeError) as e:
-                logger.error("Failed to create R2 async connector: %s", str(e))
-                self._connector = None
-
     async def close(self) -> None:
-        if self._connector:
-            try:
-                await self._connector.close()
-            except (OSError, RuntimeError) as e:
-                logger.error("Error closing R2 connection pool: %s", str(e))
-            finally:
-                self._connector = None
-
-    def __del__(self) -> None:
-        if self._connector and not self._connector.closed:
-            logger.warning(
-                "R2Storage object destroyed with open connections. Consider calling close() explicitly."
-            )
+        logger.debug("R2Storage closed")
 
     def upload_file(self, file_path: Path, key: str) -> bool:
         if not self.client:
@@ -140,15 +108,13 @@ class CloudflareR2:
             logger.error("Async session not initialized")
             return False
 
-        await self._ensure_async_connector()
-
         try:
             async with self._session.client(  # type: ignore[attr-defined]
                 "s3",
-                endpoint_url=self.s3_url,
+                endpoint_url=self.endpoint_url,
                 aws_access_key_id=self.access_key_id,
                 aws_secret_access_key=self.secret_access_key,
-                region_name="auto",
+                region_name=self.region,
                 config=self._config,
             ) as client:
                 await client.upload_file(
@@ -179,15 +145,13 @@ class CloudflareR2:
             logger.error("Async session not initialized")
             return False
 
-        await self._ensure_async_connector()
-
         try:
             async with self._session.client(  # type: ignore[attr-defined]
                 "s3",
-                endpoint_url=self.s3_url,
+                endpoint_url=self.endpoint_url,
                 aws_access_key_id=self.access_key_id,
                 aws_secret_access_key=self.secret_access_key,
-                region_name="auto",
+                region_name=self.region,
                 config=self._config,
             ) as client:
                 await client.head_object(Bucket=self.bucket_name, Key=key)
