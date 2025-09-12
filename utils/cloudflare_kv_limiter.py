@@ -1,7 +1,8 @@
+import json
 import time
 from typing import Any, Dict, Optional
 
-import httpx
+from cloudflare import Cloudflare
 from fastapi import HTTPException, Request
 
 from config.logging_config import get_logger
@@ -38,75 +39,50 @@ def parse_rate_limit(rate_limit: str) -> tuple[int, int]:
 
 class CloudflareKVLimiter:
     def __init__(self, account_id: str, namespace_id: str, api_token: str):
-        self.api_token = api_token
         self.account_id = account_id
         self.namespace_id = namespace_id
-        self.base_url = (
-            f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
-            f"/storage/kv/namespaces/{namespace_id}"
-        )
-        self.headers = {
-            "Authorization": f"Bearer {api_token}",
-            "Content-Type": "application/json",
-        }
-        self._client: Optional[httpx.AsyncClient] = None
-
-    async def _ensure_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(5.0),
-                limits=httpx.Limits(
-                    max_connections=10, max_keepalive_connections=5, keepalive_expiry=30.0
-                ),
-            )
-        return self._client
+        self.client = Cloudflare(api_token=api_token)
 
     async def close(self) -> None:
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-            self._client = None
+        # The Cloudflare client handles its own cleanup
+        pass
 
     async def get_key(self, key: str) -> Optional[dict]:
-        client = await self._ensure_client()
         try:
-            response = await client.get(f"{self.base_url}/values/{key}", headers=self.headers)
-            if response.status_code == 404:
+            response = self.client.kv.namespaces.values.get(
+                namespace_id=self.namespace_id, key_name=key, account_id=self.account_id
+            )
+            content = response.read()
+            return json.loads(content)
+        except Exception as e:
+            # Handle 404 and other errors
+            if "404" in str(e) or "not found" in str(e).lower():
                 return None
-            response.raise_for_status()
-            return response.json()
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.warning(f"KV get failed for key {key}: {e}")
-            # Close and recreate client on persistent failures
-            if isinstance(e, httpx.ConnectError) and self._client:
-                logger.info("Recreating KV client due to connection error")
-                await self._client.aclose()
-                self._client = None
-            return None
-        except (ValueError, TypeError) as e:
-            logger.error(f"JSON parsing error in KV get for key {key}: {e}")
             return None
 
     async def put_key(self, key: str, value: Dict[str, Any], ttl: Optional[int] = None) -> bool:
-        client = await self._ensure_client()
         try:
-            data: Dict[str, Any] = {"value": value}
             if ttl:
-                data["expiration_ttl"] = ttl
-
-            response = await client.put(
-                f"{self.base_url}/values/{key}", json=data, headers=self.headers
-            )
-            response.raise_for_status()
+                self.client.kv.namespaces.values.update(
+                    key_name=key,
+                    account_id=self.account_id,
+                    namespace_id=self.namespace_id,
+                    metadata="",
+                    value=json.dumps(value),
+                    expiration_ttl=int(ttl),
+                )
+            else:
+                self.client.kv.namespaces.values.update(
+                    key_name=key,
+                    account_id=self.account_id,
+                    namespace_id=self.namespace_id,
+                    metadata="",
+                    value=json.dumps(value),
+                )
             return True
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except Exception as e:
             logger.warning(f"KV put failed for key {key}: {e}")
-            if isinstance(e, httpx.ConnectError) and self._client:
-                logger.info("Recreating KV client due to connection error")
-                await self._client.aclose()
-                self._client = None
-            return False
-        except (ValueError, TypeError) as e:
-            logger.error(f"Unexpected error in KV put for key {key}: {e}")
             return False
 
     async def is_allowed(
