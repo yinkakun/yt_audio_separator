@@ -172,7 +172,6 @@ class SeparationRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     timestamp: float
-    metrics: Dict[str, int]
     services: Dict[str, bool]
 
 
