@@ -77,6 +77,10 @@ def create_fastapi_app(config, storage):
                 logger.error(f"Failed to initialize RQ queue manager: {e}")
                 logger.warning("Continuing without RQ queue manager")
                 queue_manager = None
+            except Exception as e:
+                logger.error(f"Unexpected error initializing RQ queue manager: {e}")
+                logger.warning("Continuing without RQ queue manager")
+                queue_manager = None
         else:
             logger.warning("Redis not configured - RQ queue manager disabled")
 
