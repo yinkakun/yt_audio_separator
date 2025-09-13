@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# Base stage with common dependencies
+FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -14,39 +15,51 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user 
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+# Create non-root user
+RUN groupadd -r -g 1000 appuser && \
+    useradd -r -u 1000 -g appuser -m appuser
 
-# Set working directory
+# Set working directory and change ownership
 WORKDIR /app
+RUN chown appuser:appuser /app
 
-# Install uv for faster Python package management
+# Install uv as root, then switch to appuser
 RUN pip install uv
 
-# Copy dependency files
-COPY pyproject.toml uv.lock ./
-
-# Install dependencies
-RUN uv sync --frozen --no-dev
-
-# Copy application source code
-COPY . .
-
-# Create audio workspace directory
-RUN mkdir -p audio_workspace
-
-# Change ownership to non-root user
-RUN chown -R appuser:appuser /app
-
-# Switch to non-root user
+# Switch to non-root user for everything else
 USER appuser
 
-# Expose the port
-EXPOSE 8000
+# Set up Python environment in user space
+ENV PATH="/home/appuser/.local/bin:$PATH"
+ENV PYTHONPATH="/app"
 
-# Health check
+# Copy and install dependencies
+COPY --chown=appuser:appuser pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+# Copy application code
+COPY --chown=appuser:appuser . .
+
+# Create directories in user space
+RUN mkdir -p \
+    /home/appuser/audio_workspace \
+    /home/appuser/models
+
+# Use environment variables to point to user directories
+ENV MODELS_DIR=/home/appuser/models
+ENV AUDIO_WORKSPACE_DIR=/home/appuser/audio_workspace
+
+# Web server stage
+FROM base AS web
+EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application with uvicorn
 CMD ["uv", "run", "uvicorn", "__init__:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+
+# Worker stage  
+FROM base AS worker
+CMD ["uv", "run", "python", "worker.py"]
+
+# Default stage
+FROM web AS default
