@@ -33,6 +33,11 @@ class R2Config(BaseModel):
     public_domain: str
 
 
+class RedisConfig(BaseModel):
+    url: str
+    max_connections: int = 10
+
+
 class Config(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -70,6 +75,9 @@ class Config(BaseSettings):
     # Cloudflare KV for rate limiting
     cloudflare_api_token: str = ""
     cloudflare_kv_namespace_id: str = ""
+
+    # Redis for RQ job queue
+    redis_url: str = ""
 
     @computed_field
     @property
@@ -121,6 +129,16 @@ class Config(BaseSettings):
             and self.r2_secret_access_key
             and self.r2_public_domain
         )
+
+    @computed_field
+    @property
+    def redis_config(self) -> RedisConfig:
+        return RedisConfig(url=self.redis_url)
+
+    @computed_field
+    @property
+    def redis_enabled(self) -> bool:
+        return bool(self.redis_url)
 
     @computed_field
     @property

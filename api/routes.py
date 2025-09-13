@@ -1,11 +1,10 @@
 import time
 import uuid as uuid_module
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -14,7 +13,7 @@ from config.logging_config import get_logger
 from models.job import JobStatus
 from services.audio_cache_manager import AudioCacheManager
 from utils.cloudflare_kv_limiter import CloudflareKVLimiter, parse_rate_limit
-from utils.webhook_verification import generate_webhook_signature
+from workers.queue_manager import QueueManager
 
 
 def sanitize_input(input_str: str, max_length: int) -> str:
@@ -43,121 +42,6 @@ def validate_track_id(track_id: str) -> bool:
 logger = get_logger(__name__)
 
 
-@dataclass
-class AudioProcessingTask:
-    """Configuration for audio processing background task"""
-
-    track_id: str
-    search_query: str
-    max_file_size_mb: int
-    processing_timeout: Optional[int]
-    webhook_url: Optional[str]
-    audio_processor: Any
-    webhook_secret: str = ""
-    cache_manager: Any = None
-    cache_key: str = ""
-
-
-async def send_webhook_notification(
-    callback_url: str, payload: Dict[str, Any], webhook_secret: str = ""
-) -> None:
-    """Send webhook notification"""
-    if not callback_url:
-        return
-
-    headers = {"Content-Type": "application/json"}
-    if webhook_secret:
-        signature = generate_webhook_signature(payload, webhook_secret)
-        headers["X-Webhook-Signature"] = signature
-
-    max_retries = 3
-    async with httpx.AsyncClient() as client:
-        for attempt in range(max_retries):
-            try:
-                response = await client.post(
-                    callback_url,
-                    json=payload,
-                    timeout=30.0,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                logger.info(
-                    "Webhook notification sent successfully",
-                    callback_url=callback_url,
-                    track_id=payload.get("track_id"),
-                )
-                return
-            except (httpx.RequestError, httpx.HTTPStatusError) as e:
-                if attempt == max_retries - 1:
-                    logger.error(
-                        "Failed to send webhook after all retries",
-                        callback_url=callback_url,
-                        track_id=payload.get("track_id"),
-                        error=str(e),
-                    )
-                else:
-                    logger.warning(
-                        "Webhook attempt failed, retrying",
-                        attempt=attempt + 1,
-                        callback_url=callback_url,
-                        error=str(e),
-                    )
-                    time.sleep(2**attempt)  # Exponential backoff
-
-
-async def process_audio_background(task: AudioProcessingTask) -> None:
-    """Background task to process audio separation."""
-    try:
-        logger.info(
-            "Starting audio processing task", track_id=task.track_id, search_query=task.search_query
-        )
-
-        result = task.audio_processor.process_audio(
-            track_id=task.track_id,
-            search_query=task.search_query,
-            max_file_size_mb=task.max_file_size_mb,
-            processing_timeout=task.processing_timeout,
-        )
-
-        logger.info("Audio processing completed successfully", track_id=task.track_id)
-
-        success_payload = {
-            "status": "completed",
-            "track_id": task.track_id,
-            "result": result,
-            "progress": 100,
-            "created_at": time.time(),
-        }
-
-        if task.cache_manager and task.cache_key:
-            try:
-                await task.cache_manager.cache_completed_result(
-                    task.cache_key, task.search_query, result
-                )
-            except (RuntimeError, httpx.RequestError, httpx.HTTPStatusError) as e:
-                logger.error(f"Failed to cache result: {e}")
-
-        if task.webhook_url:
-            await send_webhook_notification(task.webhook_url, success_payload, task.webhook_secret)
-
-    except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:
-        error_msg = str(e)
-        logger.error(
-            "Audio processing failed", track_id=task.track_id, error=error_msg, exc_info=True
-        )
-
-        failure_payload = {
-            "status": "failed",
-            "track_id": task.track_id,
-            "error": error_msg,
-            "progress": 0,
-            "created_at": time.time(),
-        }
-
-        if task.webhook_url:
-            await send_webhook_notification(task.webhook_url, failure_payload, task.webhook_secret)
-
-
 class SeparationRequest(BaseModel):
     search_query: str = Field(..., min_length=1, max_length=500)
 
@@ -178,13 +62,26 @@ class HealthResponse(BaseModel):
 def create_fastapi_app(config, audio_processor, storage):
     kv_limiter = None
     cache_manager = None
+    queue_manager = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         # Startup
-        nonlocal kv_limiter, cache_manager
+        nonlocal kv_limiter, cache_manager, queue_manager
 
         audio_processor.initialize_model()
+
+        if config.redis_enabled:
+            try:
+                queue_manager = QueueManager(config.redis_url)
+                queue_info = queue_manager.get_queue_info()
+                logger.info("RQ queue manager initialized", queue_info=queue_info)
+            except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:
+                logger.error(f"Failed to initialize RQ queue manager: {e}")
+                logger.warning("Continuing without RQ queue manager")
+                queue_manager = None
+        else:
+            logger.warning("Redis not configured - RQ queue manager disabled")
 
         try:
             await storage.file_exists_async("_startup_test")
@@ -218,13 +115,14 @@ def create_fastapi_app(config, audio_processor, storage):
         # Shutdown
         yield
 
+        if queue_manager:
+            queue_manager.close()
         if kv_limiter:
             await kv_limiter.close()
         await storage.close()
 
     app = FastAPI(
         title="YouTube Audio Separator API",
-        description="API for separating audio tracks into vocals and instrumental",
         version="1.0.0",
         lifespan=lifespan,
     )
@@ -326,9 +224,7 @@ def create_fastapi_app(config, audio_processor, storage):
             )
 
     @app.post("/separate-audio", status_code=status.HTTP_202_ACCEPTED)
-    async def separate_audio(
-        request: Request, separation_request: SeparationRequest, background_tasks: BackgroundTasks
-    ):  # pylint: disable=unused-argument
+    async def separate_audio(request: Request, separation_request: SeparationRequest):
         await _verify_api_key(request)
 
         await _apply_rate_limit(request, config.rate_limits.requests)
@@ -349,27 +245,45 @@ def create_fastapi_app(config, audio_processor, storage):
 
         track_id = str(uuid_module.uuid4())
 
+        if not queue_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Job queue unavailable - Redis not configured",
+            )
+
         cache_key = ""
         if cache_manager:
             cache_key = await cache_manager.mark_processing_start(search_query, track_id)
 
-        task = AudioProcessingTask(
+        storage_config = {
+            "account_id": config.r2_storage.account_id,
+            "access_key_id": config.r2_storage.access_key_id,
+            "secret_access_key": config.r2_storage.secret_access_key,
+            "bucket_name": config.r2_storage.bucket_name,
+            "public_domain": config.r2_storage.public_domain,
+        }
+
+        cache_manager_config = None
+        if kv_limiter:
+            cache_manager_config = {
+                "kv_config": {
+                    "account_id": config.cloudflare_account_id,
+                    "namespace_id": config.cloudflare_kv_namespace_id,
+                    "api_token": config.cloudflare_api_token,
+                }
+            }
+
+        queue_manager.enqueue_audio_job(
             track_id=track_id,
             search_query=search_query,
             max_file_size_mb=config.input_limits.max_file_size_mb,
-            processing_timeout=(
-                config.processing.processing_timeout
-                if hasattr(config.processing, "processing_timeout")
-                else None
-            ),
+            processing_timeout=getattr(config.processing, "processing_timeout", None),
             webhook_url=config.webhook_url,
-            audio_processor=audio_processor,
             webhook_secret=config.webhook_secret,
-            cache_manager=cache_manager,
             cache_key=cache_key,
+            storage_config=storage_config,
+            cache_manager_config=cache_manager_config,
         )
-
-        background_tasks.add_task(process_audio_background, task)
 
         logger.info(
             "Accepted job %s for search query: %s",
@@ -414,5 +328,52 @@ def create_fastapi_app(config, audio_processor, storage):
                 logger.error("KV rate limiter health check failed: %s", e)
 
         return HealthResponse(**health_status)
+
+    @app.get("/job/{track_id}")
+    async def get_job_status(request: Request, track_id: str):
+        """Get job status by track ID"""
+        await _verify_api_key(request)
+
+        if not validate_track_id(track_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid track ID format"
+            )
+
+        if not queue_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Job queue unavailable - Redis not configured",
+            )
+
+        try:
+            job_status = queue_manager.get_job_status(track_id)
+            return job_status
+        except Exception as e:
+            logger.error(f"Failed to get job status for {track_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve job status",
+            ) from e
+
+    @app.get("/queue/info")
+    async def get_queue_info(request: Request):
+        """Get queue information (admin endpoint)"""
+        await _verify_api_key(request)
+
+        if not queue_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Job queue unavailable - Redis not configured",
+            )
+
+        try:
+            queue_info = queue_manager.get_queue_info()
+            return queue_info
+        except Exception as e:
+            logger.error(f"Failed to get queue info: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve queue information",
+            ) from e
 
     return app

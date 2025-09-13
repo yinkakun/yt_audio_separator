@@ -36,11 +36,12 @@ class SeparatorProvider(Protocol):
 
 
 class DefaultSeparatorProvider:
-    def __init__(self):
+    def __init__(self, models_dir: Optional[str] = None):
         self._separator: Optional[Separator] = None
         self._separator_lock = threading.Lock()
         self.model_load_timeout = 60 * 15  # 15 minutes
         self.working_dir = Path("audio_workspace")
+        self.models_dir = models_dir or os.getenv("MODELS_DIR", "/tmp/audio-separator-models")
 
     def initialize_model(self) -> None:
         with self._separator_lock:
@@ -48,9 +49,7 @@ class DefaultSeparatorProvider:
                 return
 
             try:
-                logger.info("Preloading separator model on startup", model=MODEL_FILENAME)
                 self._separator = self._create_separator()
-                # Load the model explicitly
                 self._separator.load_model(model_filename=MODEL_FILENAME)
                 logger.info("Separator model preloaded successfully", model=MODEL_FILENAME)
             except (ImportError, RuntimeError, OSError) as e:
@@ -58,11 +57,15 @@ class DefaultSeparatorProvider:
                     "Failed to preload separator model on startup",
                     error=str(e),
                     model=MODEL_FILENAME,
+                    models_dir=self.models_dir,
                 )
                 self._separator = None
                 raise RuntimeError(f"Cannot preload audio separator: {str(e)}") from e
 
     def _create_separator(self) -> Separator:
+        models_path = Path(self.models_dir)
+        models_path.mkdir(parents=True, exist_ok=True)
+
         separator_config = {
             "output_dir": str(self.working_dir.resolve()),
             "output_format": "WAV",
@@ -70,6 +73,7 @@ class DefaultSeparatorProvider:
             "normalization_threshold": 0.9,
             "amplification_threshold": 0.9,
             "mdx_params": mdx_params,
+            "model_file_dir": self.models_dir,
         }
 
         try:
@@ -136,10 +140,13 @@ class AudioProcessor:
     def __init__(
         self,
         storage,
+        models_dir: Optional[str] = None,
+        working_dir: Optional[str] = None,
     ):
         self.storage = storage
-        self.working_dir = Path("audio_workspace")
-        self.separator_provider = DefaultSeparatorProvider()
+        working_dir_path = working_dir or os.getenv("AUDIO_WORKSPACE_DIR", "audio_workspace")
+        self.working_dir = Path(working_dir_path)
+        self.separator_provider = DefaultSeparatorProvider(models_dir=models_dir)
         self._ensure_working_dir()
 
     def _ensure_working_dir(self) -> None:
@@ -354,12 +361,16 @@ class AudioProcessor:
         try:
             self._validate_audio_file(audio_file)
             with self.separator_provider.separator_lock:
+                models_path = Path(self.separator_provider.models_dir)
+                models_path.mkdir(parents=True, exist_ok=True)
+
                 temp_separator = Separator(
                     output_dir=str(output_dir),
                     output_format="WAV",
                     normalization_threshold=0.9,
                     amplification_threshold=0.9,
                     mdx_params=mdx_params,
+                    model_file_dir=self.separator_provider.models_dir,
                 )
 
                 temp_separator.load_model(model_filename=MODEL_FILENAME)
@@ -369,6 +380,7 @@ class AudioProcessor:
                     track_id=track_id,
                     output_dir=output_dir,
                     model=MODEL_FILENAME,
+                    models_dir=self.separator_provider.models_dir,
                 )
 
                 try:
@@ -407,6 +419,8 @@ class AudioProcessor:
 
         try:
             self._validate_audio_file(audio_file)
+            models_path = Path(self.separator_provider.models_dir)
+            models_path.mkdir(parents=True, exist_ok=True)
 
             separator = Separator(
                 output_dir=str(output_dir),
@@ -414,6 +428,7 @@ class AudioProcessor:
                 normalization_threshold=0.9,
                 amplification_threshold=0.9,
                 mdx_params=mdx_params,
+                model_file_dir=self.separator_provider.models_dir,
             )
 
             separator.load_model(model_filename=MODEL_FILENAME)

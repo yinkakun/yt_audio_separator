@@ -14,6 +14,24 @@ from models.job import TrackType
 logger = get_logger(__name__)
 
 
+def get_storage_client(
+    account_id: str,
+    access_key_id: str,
+    secret_access_key: str,
+    bucket_name: str,
+    public_domain: str,
+) -> "CloudflareR2":
+    """create storage client"""
+    config = R2Storage(
+        account_id=account_id,
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        bucket_name=bucket_name,
+        public_domain=public_domain,
+    )
+    return CloudflareR2(config)
+
+
 class R2Storage(BaseModel):
     account_id: str
     access_key_id: str
