@@ -1,9 +1,8 @@
 import time
 import uuid as uuid_module
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Dict
 
-import httpx
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -59,7 +58,7 @@ class HealthResponse(BaseModel):
     services: Dict[str, bool]
 
 
-def create_fastapi_app(config, audio_processor, storage):
+def create_fastapi_app(config, storage):
     kv_limiter = None
     cache_manager = None
     queue_manager = None
@@ -68,8 +67,6 @@ def create_fastapi_app(config, audio_processor, storage):
     async def lifespan(_app: FastAPI):
         # Startup
         nonlocal kv_limiter, cache_manager, queue_manager
-
-        audio_processor.initialize_model()
 
         if config.redis_enabled:
             try:

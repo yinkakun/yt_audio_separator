@@ -60,8 +60,6 @@ def create_app() -> FastAPI:
         )
     )
 
-    audio_processor = AudioProcessor(storage)
-
-    app = create_fastapi_app(config, audio_processor, storage)
+    app = create_fastapi_app(config, storage)
 
     return app
