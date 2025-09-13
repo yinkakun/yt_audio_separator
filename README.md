@@ -1,6 +1,6 @@
 # YouTube Audio Separator
 
-FastAPI service that downloads YouTube audio and separates it into vocals and instrumental tracks using ML models. Features intelligent caching, distributed rate limiting, and webhook notifications.
+FastAPI service that downloads YouTube audio and separates it into vocals and instrumental tracks using ML models. Features intelligent caching, distributed rate limiting, job queues with Redis, and webhook notifications.
 
 ## Quick Start
 
@@ -27,12 +27,23 @@ FastAPI service that downloads YouTube audio and separates it into vocals and in
    # Optional - For webhook notifications
    export WEBHOOK_SECRET=your_webhook_secret
    export WEBHOOK_URL=https://your-app.com/webhooks
+   
+   # Required - For job queue (Redis)
+   export REDIS_URL=rediss://username:password@your-upstash-redis.com:6379
    ```
 
-3. **Start the server:**
+3. **Start the services:**
 
    ```bash
+   # Option 1: Using Docker Compose (recommended)
+   docker-compose up --scale worker=2
+   
+   # Option 2: Manual start
+   # Terminal 1 - Start web server
    uv run python main.py
+   
+   # Terminal 2 - Start worker(s)
+   uv run python worker.py
    ```
 
 4. **Process audio:**
@@ -44,6 +55,10 @@ FastAPI service that downloads YouTube audio and separates it into vocals and in
      -H "X-API-Key: your_api_secret_key" \
      -d '{"search_query": "Song Title Artist"}'
    
+   # Check job status
+   curl -H "X-API-Key: your_api_secret_key" \
+     http://localhost:5500/job/your-track-id
+   
    # Check service health
    curl http://localhost:5500/health
    ```
@@ -52,12 +67,14 @@ FastAPI service that downloads YouTube audio and separates it into vocals and in
 
 | Endpoint | Method | Description |
 |----------|---------|-------------|
-| `/separate-audio` | POST | Start audio separation job (async with webhook callback) |
+| `/separate-audio` | POST | Start audio separation job (queued with Redis) |
+| `/job/{track_id}` | GET | Get job status and results by track ID |
+| `/queue/info` | GET | Get queue statistics (admin) |
 | `/health` | GET | Health check with system metrics and service status |
 
 ### POST /separate-audio
 
-Initiates audio separation for a YouTube video. Features intelligent caching to prevent duplicate processing and reduce costs.
+Initiates audio separation for a YouTube video and queues it for processing via Redis. Features intelligent caching to prevent duplicate processing and reduce costs.
 
 **Headers:**
 
@@ -98,6 +115,79 @@ X-API-Key: your_api_secret_key
   "processing_time": 30.5,
   "created_at": 1234567890.0,
   "cached": true
+}
+```
+
+### GET /job/{track_id}
+
+Get the current status and results of a processing job by track ID.
+
+**Headers:**
+
+```
+X-API-Key: your_api_secret_key
+```
+
+**Response (Processing):**
+
+```json
+{
+  "status": "processing",
+  "track_id": "uuid",
+  "created_at": 1234567890.0,
+  "started_at": 1234567891.0
+}
+```
+
+**Response (Completed):**
+
+```json
+{
+  "status": "completed",
+  "track_id": "uuid",
+  "created_at": 1234567890.0,
+  "started_at": 1234567891.0,
+  "ended_at": 1234567920.0,
+  "result": {
+    "vocals_url": "https://domain.com/vocals.mp3",
+    "instrumental_url": "https://domain.com/instrumental.mp3",
+    "track_id": "uuid"
+  },
+  "progress": 100
+}
+```
+
+**Response (Failed):**
+
+```json
+{
+  "status": "failed",
+  "track_id": "uuid",
+  "created_at": 1234567890.0,
+  "started_at": 1234567891.0,
+  "ended_at": 1234567895.0,
+  "error": "Error message",
+  "progress": 0
+}
+```
+
+### GET /queue/info
+
+Get queue statistics and information (admin endpoint).
+
+**Headers:**
+
+```
+X-API-Key: your_api_secret_key
+```
+
+**Response:**
+
+```json
+{
+  "name": "default",
+  "length": 5,
+  "job_ids": ["uuid1", "uuid2", "uuid3"]
 }
 ```
 
@@ -189,10 +279,20 @@ def verify_webhook(payload_str: str, signature: str, secret: str) -> bool:
 | `R2_PUBLIC_DOMAIN` | Yes | - | R2 bucket public domain for file URLs |
 | `CLOUDFLARE_API_TOKEN` | No | - | API token for KV rate limiting & caching |
 | `CLOUDFLARE_KV_NAMESPACE_ID` | No | - | KV namespace ID for distributed features |
+| `REDIS_URL` | Yes | - | Redis connection URL for job queue (e.g., Upstash Redis) |
 | `PORT` | No | 5500 | Server port |
 | `MAX_FILE_SIZE_MB` | No | 50 | Maximum audio file size |
 
 ## Features
+
+### **Redis Job Queue**
+
+- **Multiple concurrent requests** - No more blocking on audio processing
+- **Job persistence** - Jobs survive server restarts and failures
+- **Horizontal scaling** - Add worker containers to increase throughput
+- **Real-time status tracking** - Monitor job progress via REST API
+- **Built-in retries** - Automatic retry on transient failures
+- **Upstash Redis support** - SSL-ready for managed Redis services
 
 ### **Intelligent Caching**
 
@@ -230,9 +330,42 @@ uv run black . && uv run isort . && uv run pylint .
 uv run python main.py
 ```
 
-## Docker
+## Docker Deployment
+
+### Docker Compose (Recommended)
 
 ```bash
+# Build and start web server + workers
+docker-compose up --build
+
+# Scale workers for higher throughput
+docker-compose up --scale worker=4
+
+# Background deployment
+docker-compose up -d --scale worker=2
+```
+
+### Manual Docker
+
+```bash
+# Build the image
 docker build -t yt-audio-separator .
-docker run -p 5500:5500 --env-file .env yt-audio-separator
+
+# Run web server
+docker run -p 5500:5500 --env-file .env \
+  --target web yt-audio-separator
+
+# Run workers (separate containers)
+docker run --env-file .env \
+  --target worker yt-audio-separator
+```
+
+### Worker Configuration
+
+Environment variables for workers:
+
+```bash
+WORKER_NAME=audio-worker-1          # Unique worker identifier
+QUEUE_NAMES=default                 # Comma-separated queue names
+WORKER_CONCURRENCY=1               # Jobs per worker
 ```
