@@ -1,6 +1,6 @@
 # YouTube Audio Separator
 
-FastAPI service that separates YouTube audio into vocals and instrumental tracks. Features Redis job queues, intelligent caching, rate limiting, and webhooks.
+FastAPI service that separates YouTube audio into vocals and instrumental tracks.
 
 ## Setup
 
@@ -75,6 +75,7 @@ Required environment variables:
 | `REDIS_URL` | Redis connection URL |
 
 Optional:
+
 - `WEBHOOK_URL` - Job completion notifications
 - `CLOUDFLARE_API_TOKEN` - Rate limiting
 - `PORT` - Server port (default: 5500)
@@ -85,11 +86,4 @@ Optional:
 
 ```bash
 docker-compose up --scale worker=2
-```
-
-### Fly.io
-
-```bash
-fly secrets set API_SECRET_KEY="your-key"
-fly deploy
 ```
