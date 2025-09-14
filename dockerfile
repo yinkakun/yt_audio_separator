@@ -55,7 +55,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["uv", "run", "uvicorn", "__init__:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
 
 # Worker stage  
 FROM base AS worker

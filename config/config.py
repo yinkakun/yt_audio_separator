@@ -49,10 +49,16 @@ class Config(BaseSettings):
     max_search_query_length: int = 200
     max_file_size_mb: int = 50
 
-    max_workers: int = 2
-    max_active_jobs: int = 2
+    max_workers: int = 1
+    max_active_jobs: int = 1
     cleanup_interval: int = 3600
     processing_timeout: int = 60
+
+    models_dir: str = "/tmp/audio-separator-models"
+    working_dir: str = "audio_workspace"
+    worker_name: str = ""
+    worker_queue_names: str = "default"
+    worker_concurrency: int = 1
 
     rate_limit_requests: str = "100 per hour"
     rate_limit_separation: str = "5 per minute"
@@ -65,18 +71,14 @@ class Config(BaseSettings):
     webhook_url: str = ""
     api_secret_key: str = ""
 
-    # Cloudflare R2 for storage
+    # Cloudflare R2 for audio file storage
     cloudflare_account_id: str = ""
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
     r2_bucket_name: str = "audio-separation"
     r2_public_domain: str = ""
 
-    # Cloudflare KV for rate limiting
-    cloudflare_api_token: str = ""
-    cloudflare_kv_namespace_id: str = ""
-
-    # Redis for RQ job queue
+    # Redis for caching and rate limiting
     redis_url: str = ""
 
     @computed_field
@@ -142,16 +144,6 @@ class Config(BaseSettings):
 
     @computed_field
     @property
-    def kv_rate_limiting_enabled(self) -> bool:
-        return bool(
-            self.cloudflare_account_id
-            and self.cloudflare_api_token
-            and self.cloudflare_kv_namespace_id
-        )
+    def queue_names(self) -> list[str]:
+        return [name.strip() for name in self.worker_queue_names.split(",") if name.strip()]
 
-    def validate_for_production(self) -> None:
-        if not self.api_secret_key:
-            raise ValueError("API_SECRET_KEY must be configured")
-
-        if not self.r2_storage_enabled:
-            raise ValueError("R2 storage must be configured")

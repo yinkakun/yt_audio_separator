@@ -1,4 +1,3 @@
-import os
 import shutil
 import threading
 import time
@@ -11,7 +10,7 @@ import yt_dlp
 from audio_separator.separator import Separator
 from yt_dlp.utils import DownloadError, ExtractorError
 
-from config.logging_config import get_logger
+from config.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -36,12 +35,12 @@ class SeparatorProvider(Protocol):
 
 
 class DefaultSeparatorProvider:
-    def __init__(self, models_dir: Optional[str] = None):
+    def __init__(self, models_dir: str):
         self._separator: Optional[Separator] = None
         self._separator_lock = threading.Lock()
         self.model_load_timeout = 60 * 15  # 15 minutes
         self.working_dir = Path("audio_workspace")
-        self.models_dir = models_dir or os.getenv("MODELS_DIR", "/tmp/audio-separator-models")
+        self.models_dir = models_dir
 
     def initialize_model(self) -> None:
         with self._separator_lock:
@@ -140,13 +139,15 @@ class AudioProcessor:
     def __init__(
         self,
         storage,
-        models_dir: Optional[str] = None,
-        working_dir: Optional[str] = None,
+        models_dir: str,
+        working_dir: str,
+        separator_provider: Optional[DefaultSeparatorProvider] = None,
     ):
         self.storage = storage
-        working_dir_path = working_dir or os.getenv("AUDIO_WORKSPACE_DIR", "audio_workspace")
-        self.working_dir = Path(working_dir_path)
-        self.separator_provider = DefaultSeparatorProvider(models_dir=models_dir)
+        self.working_dir = Path(working_dir)
+        self.separator_provider = separator_provider or DefaultSeparatorProvider(
+            models_dir=models_dir
+        )
         self._ensure_working_dir()
 
     def _ensure_working_dir(self) -> None:
@@ -155,24 +156,20 @@ class AudioProcessor:
         logger.info("Working directory initialized", path=str(self.working_dir))
 
     def cleanup_working_dir(self) -> None:
-        """Clean up the entire working directory."""
         if self.working_dir.exists():
             shutil.rmtree(self.working_dir, ignore_errors=True)
             logger.info("Working directory cleaned up", path=str(self.working_dir))
             self._ensure_working_dir()
 
     def initialize_model(self) -> None:
-        """Initialize the separator model on startup to download it before first request."""
         self.separator_provider.initialize_model()
 
     def _validate_file_size(self, size_bytes: int, max_file_size_mb: int = 100) -> None:
-        """Validate file size against maximum allowed size."""
         size_mb = int(size_bytes) / (1024 * 1024)
         if size_mb > max_file_size_mb:
             raise ValueError(f"File too large: {size_mb:.1f}MB (limit: {max_file_size_mb}MB)")
 
     def _validate_file_size_approx(self, size_bytes: int, max_file_size_mb: int = 100) -> None:
-        """Validate approximate file size against maximum allowed size."""
         size_mb = int(size_bytes) / (1024 * 1024)
         if size_mb > max_file_size_mb:
             raise ValueError(
@@ -180,14 +177,12 @@ class AudioProcessor:
             )
 
     def _validate_audio_file(self, audio_file: Path) -> None:
-        """Validate audio file before processing."""
         if not audio_file.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_file}")
 
         if audio_file.stat().st_size == 0:
             raise ValueError(f"Audio file is empty: {audio_file}")
 
-        # Check file extension
         allowed_extensions = {".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg"}
         if audio_file.suffix.lower() not in allowed_extensions:
             raise ValueError(f"Unsupported audio format: {audio_file.suffix}")
@@ -210,40 +205,61 @@ class AudioProcessor:
 
         return vocals_file, instrumental_file
 
+    def _setup_job_directory(self, track_id: str) -> Path:
+        job_dir = self.working_dir / track_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        return job_dir
+
+    def _process_audio_files(
+        self, job_dir: Path, track_id: str, search_query: str, max_file_size_mb: int
+    ) -> tuple[Path, Path, str]:
+        logger.info("Downloading audio", track_id=track_id, query=search_query)
+        downloaded_file, original_title = self.download_audio(
+            job_dir, search_query, max_file_size_mb
+        )
+
+        logger.info("Separating audio", track_id=track_id)
+        vocals_file, instrumental_file = self.separate_audio_tracks(
+            job_dir, downloaded_file, track_id
+        )
+
+        return vocals_file, instrumental_file, original_title or ""
+
+    def _upload_and_create_result(
+        self, track_id: str, vocals_file: Path, instrumental_file: Path, original_title: str
+    ) -> Dict[str, str]:
+        logger.info("Uploading separated files", track_id=track_id)
+        upload_success = self.storage.upload_track_files(track_id, vocals_file, instrumental_file)
+
+        if not upload_success:
+            raise RuntimeError("Failed to upload separated audio files to storage")
+
+        logger.info("Upload successful", track_id=track_id)
+        return self.create_result_dict(track_id, original_title)
+
+    def _cleanup_job_directory(self, job_dir: Optional[Path]) -> None:
+        if job_dir and job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
+
     def process_audio(
         self,
         track_id: str,
         search_query: str,
         max_file_size_mb: int,
-        processing_timeout: Optional[int] = None,
     ) -> Dict[str, str]:
         job_dir: Optional[Path] = None
-        timeout_value = processing_timeout
 
         try:
-            job_dir = self.working_dir / track_id
-            job_dir.mkdir(parents=True, exist_ok=True)
+            job_dir = self._setup_job_directory(track_id)
 
-            logger.info(
-                "Downloading audio",
-                track_id=track_id,
-                query=search_query,
-            )
-            downloaded_file, original_title = self.download_audio(
-                job_dir, search_query, max_file_size_mb
+            vocals_file, instrumental_file, original_title = self._process_audio_files(
+                job_dir, track_id, search_query, max_file_size_mb
             )
 
-            logger.info("Separating audio", track_id=track_id, timeout=timeout_value)
-            vocals_file, instrumental_file = self.separate_audio_tracks(
-                job_dir,
-                downloaded_file,
-                track_id,
+            result = self._upload_and_create_result(
+                track_id, vocals_file, instrumental_file, original_title
             )
 
-            logger.info("Uploading separated tracks to storage", track_id=track_id)
-            self.storage.upload_track_files(track_id, vocals_file, instrumental_file)
-
-            result = self.create_result_dict(track_id, original_title)
             logger.info(
                 "Job completed successfully", track_id=track_id, result_keys=list(result.keys())
             )
@@ -259,9 +275,7 @@ class AudioProcessor:
             raise
 
         finally:
-            if job_dir and job_dir.exists():
-                shutil.rmtree(job_dir, ignore_errors=True)
-                logger.info("Cleaned up job directory", track_id=track_id, path=str(job_dir))
+            self._cleanup_job_directory(job_dir)
 
     def create_result_dict(self, track_id: str, original_title: Optional[str]) -> Dict[str, str]:
         result = {

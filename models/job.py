@@ -3,11 +3,6 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 
-class TrackType(Enum):
-    VOCALS = "vocals"
-    INSTRUMENTAL = "instrumental"
-
-
 class JobStatus(Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"

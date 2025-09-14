@@ -1,16 +1,17 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from urllib.parse import urlparse
 
 import redis
-from rq import Queue
+from rq import Queue as RQQueue
 
-from config.logging_config import get_logger
-from workers.audio_jobs import process_audio_job
+from config.logger import get_logger
+from models.request import ProcessingJobRequest
+from workers.jobs import process_audio_job
 
 logger = get_logger(__name__)
 
 
-class QueueManager:
+class JobQueue:
     def __init__(self, redis_url: str):
         self.redis_url = redis_url
         self._connection = None
@@ -44,47 +45,28 @@ class QueueManager:
 
         return self._connection
 
-    def get_queue(self, queue_name: str = "default") -> Queue:
-        """Get RQ queue instance"""
+    def get_queue(self, queue_name: str = "default") -> RQQueue:
         if self._queue is None:
             connection = self.get_redis_connection()
-            self._queue = Queue(queue_name, connection=connection)
+            self._queue = RQQueue(queue_name, connection=connection)
             logger.info(f"Queue '{queue_name}' initialized")
         return self._queue
 
-    def enqueue_audio_job(
+    def enqueue_job(
         self,
-        track_id: str,
-        search_query: str,
-        max_file_size_mb: int,
-        processing_timeout: Optional[int],
-        webhook_url: str,
-        webhook_secret: str,
-        cache_key: str,
-        storage_config: Dict[str, Any],
-        cache_manager_config: Optional[Dict[str, Any]] = None,
+        job_request: ProcessingJobRequest,
         job_timeout: int = 60 * 10,  # 10 minutes
     ):
-        """Enqueue audio processing job"""
-
         queue = self.get_queue()
 
         job = queue.enqueue(
             process_audio_job,
-            track_id,
-            search_query,
-            max_file_size_mb,
-            processing_timeout,
-            webhook_url,
-            webhook_secret,
-            cache_key,
-            storage_config,
-            cache_manager_config,
-            job_id=track_id,
+            job_request,
+            job_id=job_request.track_id,
             job_timeout=job_timeout,
         )
 
-        logger.info("Enqueued audio processing job", job_id=job.id, track_id=track_id)
+        logger.info("Enqueued audio processing job", job_id=job.id, track_id=job_request.track_id)
         return job
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:

@@ -8,8 +8,8 @@ from aiobotocore.config import AioConfig
 from botocore.exceptions import ClientError, NoCredentialsError
 from pydantic import BaseModel
 
-from config.logging_config import get_logger
-from models.job import TrackType
+from config.logger import get_logger
+from services.audio_classifier import AudioClassifier, AudioType
 
 logger = get_logger(__name__)
 
@@ -74,9 +74,9 @@ class CloudflareR2:
                 retries={"max_attempts": 3, "mode": "adaptive"},
             )
             self._session = aioboto3.Session()
-            logger.info("Initialized R2 configuration")
+            logger.info("Initialized R2")
         except (ValueError, OSError, RuntimeError) as e:
-            logger.error("Failed to initialize R2 config: %s", str(e))
+            logger.error("Failed to initialize R2: %s", str(e))
             self._config = AioConfig(retries={"max_attempts": 3, "mode": "adaptive"})
             self._session = aioboto3.Session()
 
@@ -177,16 +177,10 @@ class CloudflareR2:
         except ClientError:
             return False
 
-    TRACK_PATTERNS = {
-        TrackType.VOCALS: ["vocals", "(Vocals)"],
-        TrackType.INSTRUMENTAL: ["instrumental", "(Instrumental)", "no_vocals"],
-    }
-
     def cleanup_track_files(self, track_id: str):
-        """Clean up track files from R2 storage."""
         try:
-            for track_type in TrackType:
-                r2_key = f"{track_id}/{track_type.value}.mp3"
+            for track_type in AudioType:
+                r2_key = AudioClassifier.get_track_filename(track_id, track_type)
                 try:
                     if self.delete_file(r2_key):
                         logger.debug("Cleaned up R2 file: %s", r2_key)
@@ -197,33 +191,9 @@ class CloudflareR2:
 
     @staticmethod
     def detect_separated_files(output_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
-        """Detect vocals and instrumental files in the output directory."""
-        vocals_file = None
-        instrumental_file = None
-
-        all_files = list(output_dir.iterdir())
-
-        for file_path in all_files:
-            if not file_path.is_file():
-                continue
-
-            filename = file_path.name.lower()
-
-            for track_type, patterns in CloudflareR2.TRACK_PATTERNS.items():
-                matching_patterns = [pattern for pattern in patterns if pattern.lower() in filename]
-                if not matching_patterns:
-                    continue
-
-                if track_type == TrackType.VOCALS:
-                    vocals_file = file_path
-                else:
-                    instrumental_file = file_path
-                break
-
-        return vocals_file, instrumental_file
+        return AudioClassifier.detect_separated_files(output_dir)
 
     def upload_track_files(self, track_id: str, vocals_file: Path, instrumental_file: Path) -> bool:
-        """Upload vocals and instrumental files to R2."""
         try:
             vocals_key = f"{track_id}/vocals.mp3"
             instrumental_key = f"{track_id}/instrumental.mp3"
@@ -232,14 +202,13 @@ class CloudflareR2:
             instrumental_uploaded = self.upload_file(instrumental_file, instrumental_key)
 
             return vocals_uploaded and instrumental_uploaded
-        except (OSError, ClientError, NoCredentialsError) as e:
+        except (ClientError, NoCredentialsError) as e:
             logger.error("Failed to upload track files to R2: %s", e)
             return False
 
     async def upload_track_files_async(
         self, track_id: str, vocals_file: Path, instrumental_file: Path
     ) -> bool:
-        """Upload vocals and instrumental files to R2 asynchronously."""
         try:
             vocals_key = f"{track_id}/vocals.mp3"
             instrumental_key = f"{track_id}/instrumental.mp3"
@@ -249,6 +218,6 @@ class CloudflareR2:
             upload_results = await self.upload_files_parallel(file_uploads)
             return all(upload_results)
 
-        except (OSError, ClientError, NoCredentialsError) as e:
+        except (ClientError, NoCredentialsError) as e:
             logger.error("Failed to upload track files to R2 (async): %s", e)
             return False
